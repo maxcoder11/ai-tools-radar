@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 工具榜 · AI Tools Radar</title>
+<meta name="description" content="AI 工具站增长情报:真实流量、增长曲线、渠道构成、外链来源,免费公开。">
+<style>
+  :root { --ink:#111827; --mut:#6b7280; --line:#e5e7eb; --bg:#f8fafc; --acc:#2563eb; --good:#047857; --bad:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.55 -apple-system,"PingFang SC","Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:#fff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  .bar { max-width:1180px; margin:0 auto; padding:12px 16px 8px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .logo { font-weight:800; font-size:17px; letter-spacing:.3px; }
+  .logo span { color:var(--acc); }
+  .sub { color:var(--mut); font-size:12px; }
+  .grow { flex:1; }
+  input[type=search] { padding:7px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; width:210px; }
+  select { padding:7px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px; background:#fff; }
+  .lang { border:1px solid var(--line); border-radius:8px; padding:6px 12px; background:#fff; cursor:pointer; font-size:12.5px; }
+  .stats { max-width:1180px; margin:0 auto; padding:2px 16px 10px; display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:6px 14px; }
+  .stat b { font-size:15px; font-variant-numeric:tabular-nums; }
+  .stat i { font-style:normal; color:var(--mut); font-size:11.5px; margin-left:5px; }
+  .tabs { max-width:1180px; margin:0 auto; padding:0 16px; display:flex; gap:4px; }
+  .tab { border:none; background:none; font-size:13.5px; font-weight:600; color:var(--mut); padding:8px 14px; cursor:pointer; border-bottom:2px solid transparent; }
+  .tab.on { color:var(--acc); border-bottom-color:var(--acc); }
+  .chips { max-width:1180px; margin:8px auto 0; padding:0 16px; display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { border:1px solid var(--line); background:#fff; border-radius:999px; padding:4px 12px; font-size:12px; cursor:pointer; color:var(--mut); }
+  .chip.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  main { max-width:1180px; margin:14px auto 60px; padding:0 16px; }
+  .count { color:var(--mut); font-size:12px; margin:6px 2px 10px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  thead th { text-align:left; font-size:12px; color:var(--mut); font-weight:600; padding:10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  tbody td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tbody tr.row { cursor:pointer; }
+  tbody tr.row:hover { background:#f1f5f9; }
+  .rk { color:var(--mut); width:34px; text-align:right; padding-right:6px; font-variant-numeric:tabular-nums; }
+  .name { font-weight:700; font-size:13.5px; }
+  .fav { width:16px; height:16px; border-radius:4px; vertical-align:-3px; margin-right:5px; }
+  .dom { color:var(--acc); font-size:12px; text-decoration:none; }
+  .dom:hover { text-decoration:underline; }
+  .desc { color:var(--mut); font-size:12px; margin-top:2px; max-width:420px; }
+  .tag { display:inline-block; background:#eef2ff; color:#4338ca; border-radius:5px; padding:1px 7px; font-size:11px; margin:1px 2px 1px 0; }
+  .free { font-size:11.5px; border-radius:5px; padding:1px 7px; }
+  .free.free { background:#ecfdf5; color:#047857; }
+  .free.freemium { background:#fffbeb; color:#b45309; }
+  .free.paid { background:#fef2f2; color:#b91c1c; }
+  .free.unknown { background:#f3f4f6; color:#6b7280; }
+  .new { display:inline-block; background:#ecfdf5; color:var(--good); border:1px solid #a7f3d0; border-radius:5px; padding:0 6px; font-size:10.5px; font-weight:700; margin-left:4px; }
+  .num { font-variant-numeric:tabular-nums; white-space:nowrap; font-size:12.5px; }
+  .dim { color:var(--mut); }
+  .mom-up { color:var(--good); font-weight:700; }
+  .mom-down { color:var(--bad); font-weight:700; }
+  .bar-cell { min-width:110px; }
+  .meter { height:4px; background:#eef2f7; border-radius:2px; margin-top:4px; }
+  .meter i { display:block; height:4px; border-radius:2px; background:linear-gradient(90deg,#60a5fa,#2563eb); }
+  .meter.sem i { background:linear-gradient(90deg,#34d399,#059669); }
+  /* 详情抽屉 */
+  tr.detail td { background:#fbfdff; padding:12px 16px; }
+  .dgrid { display:flex; gap:24px; flex-wrap:wrap; }
+  .dblock { min-width:260px; flex:1; }
+  .dblock h4 { margin:0 0 6px; font-size:12px; color:var(--mut); font-weight:600; }
+  .spark { width:100%; height:56px; }
+  .mixbar { display:flex; height:10px; border-radius:5px; overflow:hidden; width:100%; }
+  .mixbar i { display:block; height:10px; }
+  .mixlg { font-size:11px; color:var(--mut); margin-top:4px; display:flex; gap:10px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:3px; vertical-align:-1px; }
+  .kw { display:inline-block; background:#f0fdf4; color:#166534; border-radius:5px; padding:1px 8px; font-size:11px; margin:2px 3px 0 0; }
+  .src { font-size:12px; color:var(--mut); }
+  .src a { color:var(--acc); text-decoration:none; }
+  footer { color:var(--mut); font-size:12px; text-align:center; padding:26px 0 40px; }
+  @media (max-width:760px){ .desc{max-width:220px} .hideS{display:none} .stats{gap:6px} .dgrid{flex-direction:column} }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="logo">AI <span>工具榜</span></div>
+    <div class="sub" data-i18n="sub">AI 工具站增长情报 · 真实流量/曲线/渠道/外链 · 免费公开</div>
+    <div class="grow"></div>
+    <input type="search" id="q" placeholder="搜索名称/域名/描述…" data-i18n-ph="q">
+    <select id="sort"></select>
+    <button class="lang" id="langBtn">EN</button>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="tabs" id="tabs"></div>
+  <div class="chips" id="chips"></div>
+</header>
+<main>
+  <div class="count" id="count"></div>
+  <div id="board"></div>
+  <footer data-i18n="foot">数据来自公开数据源汇总,仅供研究参考 · AI Tools Radar</footer>
+</main>
+<script>
+const I18N = {
+  zh: { sub:'AI 工具站增长情报 · 真实流量/曲线/渠道/外链 · 免费公开', q:'搜索名称/域名/描述…',
+        v_top:'总榜', v_growth:'增长榜', v_new:'新品雷达', v_links:'外链榜', v_lib:'外链库',
+        s_visits:'按月访问量', s_sem:'按自然搜索流量', s_rank:'按全球排名', s_reg:'按域名注册(新→老)', s_mom:'按环比增长', s_size:'按当前体量',
+        c_site:'站点及描述', c_cat:'分类', c_free:'免费', c_visits:'月访问量', c_sem:'自然搜索流量', c_bl:'反链', c_rank:'全球排名', c_reg:'域名注册', c_mom:'环比', c_trend:'近12月趋势',
+        c_src:'来源域', c_targets:'链向站数', c_blog:'博客占比', c_ascore:'权重分', c_samples:'链接样本',
+        c_page:'来源页面', c_plat:'平台', c_seen:'最近见于', c_anchor:'锚文本', c_first:'首次发现',
+        lib_h:'竞品外链侦察', lib_sub:'输入竞品域名,看它全部的 dofollow 外链来源——照着这份清单发你的外链', lib_ph:'输入域名,如 janitorai.com',
+        st_total:'收录站点', st_traffic:'有实测流量', st_new:'近90天新品', st_dirs:'数据来源目录',
+        d_trend:'近 12 个月访问量', d_mix:'流量构成', d_kw:'头部关键词', d_bl:'Dofollow 反链',
+        foot:'数据来自公开数据源汇总,仅供研究参考 · AI Tools Radar', all:'全部', rows:'个站点',
+        unknown:'未知', free:'免费', freemium:'部分免费', paid:'付费', new_b:'新品',
+        m_organic:'自然搜索', m_direct:'直接访问', m_referrals:'引荐', m_social:'社媒', m_email:'邮件', m_genai:'AI 引荐', m_paid:'付费', m_other:'其他' },
+  en: { sub:'Growth intelligence for AI tools · traffic/curves/channels/backlinks · free',
+        q:'Search name/domain/desc…',
+        v_top:'Top', v_growth:'Growth', v_new:'New Radar', v_links:'Backlinks', v_lib:'Link Library',
+        s_visits:'By monthly visits', s_sem:'By organic traffic', s_rank:'By global rank', s_reg:'By domain reg (newest)', s_mom:'By MoM growth', s_size:'By current size',
+        c_site:'Site & description', c_cat:'Category', c_free:'Free', c_visits:'Monthly visits', c_sem:'Organic traffic', c_bl:'Backlinks', c_rank:'Global rank', c_reg:'Domain reg.', c_mom:'MoM', c_trend:'12-mo trend',
+        c_src:'Source domain', c_targets:'Sites linked', c_blog:'Blog %', c_ascore:'Authority', c_samples:'Samples',
+        c_page:'Source page', c_plat:'Platform', c_seen:'Last seen', c_anchor:'Anchor', c_first:'First seen',
+        lib_h:'Competitor backlink intel', lib_sub:'Enter a competitor domain to see all its dofollow backlink sources — go get the same links', lib_ph:'e.g. janitorai.com',
+        st_total:'Sites tracked', st_traffic:'With traffic data', st_new:'New in 90 days', st_dirs:'Source directories',
+        d_trend:'Monthly visits (12 mo)', d_mix:'Traffic mix', d_kw:'Top keywords', d_bl:'Dofollow backlinks',
+        foot:'Aggregated from public data sources, for research only · AI Tools Radar', all:'All', rows:' sites',
+        unknown:'n/a', free:'Free', freemium:'Freemium', paid:'Paid', new_b:'NEW',
+        m_organic:'Organic search', m_direct:'Direct', m_referrals:'Referrals', m_social:'Social', m_email:'Email', m_genai:'Gen AI', m_paid:'Paid', m_other:'Other' },
+};
+const VIEWS = ['top', 'growth', 'new', 'lib'];
+const SORTS = { top: ['visits','sem_traffic','global_rank','registered'],
+                growth: ['mom','size'],
+                new: ['registered','visits'],
+                lib: [] };
+let LANG = localStorage.getItem('tr_lang') || 'zh';
+let DATA = [], BOARD = [], LIB = null, LINKS_IDX = [], CATS = [], cat = '', q = '', sortBy = 'visits', view = 'top', openDom = null;
+let libDom = '', libRows = null;
+const $ = id => document.getElementById(id);
+const fmt = n => n == null ? '—' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n);
+const NOW = Date.now(), D90 = 90*864e5;
+const isNew = r => {
+  if (r.registered && (NOW - new Date(r.registered).getTime()) < D90) return true;
+  if (r.listed_month) {
+    const [y,m] = r.listed_month.split('-').map(Number), d = new Date();
+    if ((d.getFullYear()-y)*12 + (d.getMonth()+1-m) < 3) return true;
+  }
+  return false;
+};
+const MIXC = { organic:'#059669', direct:'#2563eb', referrals:'#d97706', social:'#db2777', email:'#7c3aed', genai:'#0d9488', paid:'#dc2626' };
+
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 【08-16】总榜反链列的 ⬇:有明细的域下载 CSV,没有的一开始就显示 —(按钮不出现)
+function dlBl(dom) {
+  fetch(`data/links/${dom}.json`).then(r => r.ok ? r.json() : []).then(rows => {
+    if (!rows.length) return;
+    const csv = ['source_url,source_title,anchor,platform,ascore,first_seen']
+      .concat(rows.map(r => [r.u, r.s, r.a, r.p, r.s2,
+        /^\d{9,}$/.test(String(r.f)) ? new Date(+r.f * 1000).toISOString().slice(0, 10) : r.f]
+        .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')))
+      .join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
+    a.download = `${dom}-dofollow.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+function spark(monthly) {
+  if (!monthly || monthly.length < 2) return '';
+  const vs = monthly.map(p => p[1]);
+  const mx = Math.max(...vs), mn = Math.min(...vs);
+  const pts = vs.map((v,i) => `${(i/(vs.length-1)*100).toFixed(1)},${(26 - (v-mn)/(mx-mn||1)*24).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="#2563eb" stroke-width="1.6"/></svg>`;
+}
+function mixBar(mix) {
+  const t = I18N[LANG];
+  if (!mix) return '<span class="dim">—</span>';
+  const parts = [['organic',mix.organic],['direct',mix.direct],['referrals',mix.referrals],
+                 ['social',(mix.social||0)+(mix.social_paid||0)],['email',mix.email],
+                 ['genai',mix.genai],['paid',(mix.paid_search||0)+(mix.display||0)]].filter(p => p[1] > 0.005);
+  if (!parts.length) return '<span class="dim">—</span>';
+  const bar = parts.map(([k,v]) => `<i style="width:${(v*100).toFixed(1)}%;background:${MIXC[k]}" title="${t['m_'+k]} ${(v*100).toFixed(1)}%"></i>`).join('');
+  const lg = parts.map(([k,v]) => `<span><i class="dot" style="background:${MIXC[k]}"></i>${t['m_'+k]} ${(v*100).toFixed(0)}%</span>`).join('');
+  return `<div class="mixbar">${bar}</div><div class="mixlg">${lg}</div>`;
+}
+
+function renderStats() {
+  const t = I18N[LANG];
+  $('stats').innerHTML = [
+    `<div class="stat"><b>${fmt(DATA.length)}</b><i>${t.st_total}</i></div>`,
+    `<div class="stat"><b>${fmt(DATA.filter(r=>r.visits||r.global_rank).length)}</b><i>${t.st_traffic}</i></div>`,
+    `<div class="stat"><b>${fmt(DATA.filter(isNew).length)}</b><i>${t.st_new}</i></div>`,
+    `<div class="stat"><b>6</b><i>${t.st_dirs}</i></div>`,
+  ].join('');
+}
+function renderTabs() {
+  const t = I18N[LANG];
+  $('tabs').innerHTML = VIEWS.map(v => `<button class="tab ${view===v?'on':''}" data-v="${v}">${t['v_'+v]}</button>`).join('');
+  $('tabs').querySelectorAll('.tab').forEach(b => b.onclick = () => {
+    view = b.dataset.v; openDom = null;
+    if (view === 'lib' && LIB === null) {          // 外链库几 MB,首次切到再加载
+      $('count').textContent = '…';
+      fetch('data/library.json?t=' + Date.now()).then(r => r.json()).then(l => { LIB = l; render(); });
+    }
+    renderTabs(); renderSort(); renderChips(); render();
+  });
+}
+function renderSort() {
+  const t = I18N[LANG];
+  const opts = SORTS[view];
+  $('sort').style.display = opts.length ? '' : 'none';
+  sortBy = opts[0] || '';
+  $('sort').innerHTML = opts.map(s => `<option value="${s}">${t['s_'+s]||t['c_'+s]||s}</option>`).join('');
+  if (view === 'new') sortBy = 'registered';
+}
+function renderChips() {
+  const t = I18N[LANG];
+  $('chips').style.display = (view === 'lib') ? 'none' : 'flex';
+  $('chips').innerHTML = [`<button class="chip ${!cat?'on':''}" data-c="">${t.all}</button>`,
+    ...CATS.map(c => `<button class="chip ${cat===c?'on':''}" data-c="${esc(c)}">${esc(c)}</button>`)].join('');
+  $('chips').querySelectorAll('.chip').forEach(b => b.onclick = () => { cat = b.dataset.c; renderChips(); render(); });
+}
+
+function rowHtml(r, i, t) {
+  const momHtml = r.mom == null ? '<span class="dim">—</span>'
+    : `<span class="${r.mom >= 0 ? 'mom-up' : 'mom-down'}">${r.mom >= 0 ? '+' : ''}${r.mom}%</span>`;
+  return `<td class="rk">${i+1}</td>
+    <td><div class="name"><img class="fav" src="https://www.google.com/s2/favicons?domain=${r.domain}&sz=32" loading="lazy" onerror="this.style.visibility='hidden'"> ${esc(r.name)}${isNew(r)?`<span class="new">${t.new_b}</span>`:''}</div>
+        <a class="dom" href="https://${r.domain}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${r.domain}</a>
+        <div class="desc">${esc(LANG==='zh' ? (r.desc_zh||r.desc_en||'') : (r.desc_en||r.desc_zh||''))}</div></td>
+    <td>${(r.categories||[]).map(c=>`<span class="tag">${esc(c)}</span>`).join('')}</td>
+    <td><span class="free ${r.free}">${t[r.free]||t.unknown}</span></td>
+    <td class="num bar-cell">${fmt(r.visits)}<div class="meter"><i style="width:${Math.round((r.visits||0)/(window._maxV||1)*100)}%"></i></div></td>
+    <td class="num bar-cell">${r.sem_traffic ? fmt(r.sem_traffic) : '—'}<div class="meter sem"><i style="width:${Math.round((r.sem_traffic||0)/(window._maxS||1)*100)}%"></i></div></td>
+    <td class="num">${momHtml}</td>
+    <td class="num dim hideS">${r.bl ? fmt(r.bl) + (LINKS_IDX.includes(r.domain) ? ` <a href="#" title="下载 dofollow 明细 CSV" onclick="event.stopPropagation();dlBl('${r.domain}');return false" style="text-decoration:none">⬇</a>` : '') : '—'}</td>
+    <td class="num dim hideS">${r.global_rank ? fmt(r.global_rank) : '—'}</td>
+    <td class="num dim hideS">${(r.registered||'').slice(0,10) || '—'}</td>`;
+}
+function detailHtml(r, t) {
+  const blocks = [];
+  if (r.monthly && r.monthly.length > 1)
+    blocks.push(`<div class="dblock"><h4>${t.d_trend}</h4>${spark(r.monthly)}<div class="src">${r.monthly[0][0].slice(0,7)}: ${fmt(r.monthly[0][1])} → ${r.monthly[r.monthly.length-1][0].slice(0,7)}: ${fmt(r.monthly[r.monthly.length-1][1])}</div></div>`);
+  if (r.mix)
+    blocks.push(`<div class="dblock"><h4>${t.d_mix}</h4>${mixBar(r.mix)}</div>`);
+  if (r.kw && r.kw.length)
+    blocks.push(`<div class="dblock"><h4>${t.d_kw}</h4>${r.kw.map(k=>`<span class="kw">${esc(k.n)} ${k.v?fmt(k.v):''}</span>`).join('')}</div>`);
+  if (r.bl)
+    blocks.push(`<div class="dblock"><h4>${t.d_bl}</h4><div class="src">dofollow ${fmt(r.bl)}${r.bl_blog?` · blog ${fmt(r.bl_blog)}`:''}
+      ${LINKS_IDX.includes(r.domain)?` · <a href="#" onclick="event.stopPropagation();libDom='${r.domain}';libRows=null;view='lib';if(LIB===null){fetch('data/library.json?t='+Date.now()).then(r=>r.json()).then(l=>{LIB=l;});}fetch('data/links/${r.domain}.json').then(r=>r.json()).then(rows=>{libRows=rows;renderTabs();renderSort();renderChips();render();});return false">查来源 →</a>`:''}</div></div>`);
+  return blocks.length ? `<tr class="detail"><td colspan="10"><div class="dgrid">${blocks.join('')}</div></td></tr>` : '';
+}
+
+function render() {
+  const t = I18N[LANG];
+  if (view === 'lib') return renderLib(t);
+  let rows = DATA.filter(r =>
+    (!cat || (r.categories||[]).includes(cat)) &&
+    (!q || (r.name + r.domain + (r.desc_zh||'') + (r.desc_en||'')).toLowerCase().includes(q)));
+  if (view === 'new') rows = rows.filter(isNew);
+  if (view === 'growth') rows = rows.filter(r => r.mom != null && (r.visits || 0) >= 1000);
+  rows.sort((a,b) => {
+    if (sortBy === 'global_rank') return (a.global_rank || 9e9) - (b.global_rank || 9e9);
+    if (sortBy === 'registered') return String(b.registered||'').localeCompare(String(a.registered||''));
+    if (sortBy === 'sem_traffic') return (b.sem_traffic || 0) - (a.sem_traffic || 0);
+    if (sortBy === 'mom') return (b.mom ?? -1e9) - (a.mom ?? -1e9);
+    return (b.visits || 0) - (a.visits || 0);
+  });
+  window._maxV = Math.max(1, ...rows.map(r => r.visits || 0));
+  window._maxS = Math.max(1, ...rows.map(r => r.sem_traffic || 0));
+  $('count').textContent = `${rows.length} ${t.rows}`;
+  const head = `<thead><tr><th>#</th><th>${t.c_site}</th><th>${t.c_cat}</th><th>${t.c_free}</th>
+    <th>${t.c_visits}</th><th>${t.c_sem}</th><th>${t.c_mom}</th>
+    <th class="hideS">${t.c_bl}</th><th class="hideS">${t.c_rank}</th><th class="hideS">${t.c_reg}</th></tr></thead>`;
+  const body = rows.map((r,i) => {
+    const h = `<tr class="row" data-d="${r.domain}">${rowHtml(r, i, t)}</tr>`;
+    return h + (openDom === r.domain ? detailHtml(r, t) : '');
+  }).join('');
+  $('board').innerHTML = `<table>${head}<tbody>${body}</tbody></table>`;
+  $('board').querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
+    openDom = openDom === tr.dataset.d ? null : tr.dataset.d;
+    render();
+  });
+}
+
+function renderLinks(t) {
+  let rows = BOARD.filter(r => !q || r.src.includes(q));
+  $('count').textContent = `${rows.length} ${t.rows}`;
+  const body = rows.map((r,i) => `<tr class="row">
+    <td class="rk">${i+1}</td>
+    <td><div class="name">${esc(r.src)}</div></td>
+    <td class="num">${r.targets}</td>
+    <td class="num">${r.blog_pct}%</td>
+    <td class="num">${r.ascore || '—'}</td>
+    <td class="src">${(r.samples||[]).map(s => `<a href="https://${s.d}" target="_blank" rel="noopener">${esc(s.d)}</a>`).join(' · ')}</td>
+  </tr>`).join('');
+  $('board').innerHTML = `<table><thead><tr><th>#</th><th>${t.c_src}</th><th>${t.c_targets}</th><th>${t.c_blog}</th><th>${t.c_ascore}</th><th>${t.c_samples}</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderLib(t) {
+  // 【08-16 用户定】外链库的核心交互:查竞品的 dofollow 来源,照着投
+  const head = `<div style="background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px">
+    <b>${t.lib_h}</b><div class="dim" style="font-size:12px;margin:2px 0 8px">${t.lib_sub}</div>
+    <input type="search" id="compq" list="links_idx" placeholder="${t.lib_ph}" value="${esc(libDom)}"
+      style="padding:8px 12px;border:1px solid var(--acc);border-radius:8px;font-size:13px;width:320px">
+    <datalist id="links_idx">${LINKS_IDX.map(d => `<option value="${d}">`).join('')}</datalist>
+    ${libDom && libRows ? `<span class="dim" style="margin-left:10px;font-size:12px">${libRows.length} ${t.rows}</span>` : ''}
+  </div>`;
+  if (libRows) {
+    $('count').textContent = `${libDom} — ${libRows.length} ${t.rows}`;
+    const body = libRows.map((r,i) => `<tr class="row">
+      <td class="rk">${i+1}</td>
+      <td><a class="dom" href="${esc(r.u)}" target="_blank" rel="noopener">${esc(r.u.replace(/^https?:\/\//,'').slice(0,65))}</a>
+          <div class="desc">${esc(r.s)}</div></td>
+      <td class="dim">${esc(r.a)||'—'}</td>
+      <td class="dim">${esc(r.p)||'—'}</td>
+      <td class="num">${r.s2||'—'}</td>
+      <td class="num dim">${/^\d{9,}$/.test(r.f) ? new Date(+r.f * 1000).toISOString().slice(0, 10) : (esc(r.f) || '—')}</td>
+    </tr>`).join('');
+    $('board').innerHTML = head + `<table><thead><tr><th>#</th><th>${t.c_page}</th><th>${t.c_anchor}</th><th>${t.c_plat}</th><th>${t.c_ascore}</th><th>${t.c_first}</th></tr></thead><tbody>${body}</tbody></table>`;
+  } else if (LIB === null) {
+    $('board').innerHTML = head;
+  } else {
+    let rows = LIB.filter(r => !q || (r.url + r.src + r.title).toLowerCase().includes(q));
+    $('count').textContent = `${rows.length} ${t.rows}`;
+    const body = rows.map((r,i) => `<tr class="row">
+    <td class="rk">${i+1}</td>
+    <td><a class="dom" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url.replace(/^https?:\/\//,'').slice(0,60))}</a>
+        <div class="desc">${esc(r.title)}</div></td>
+    <td class="dim">${esc(r.src)}</td>
+    <td class="dim">${esc(r.plat)||'—'}</td>
+    <td class="num">${r.ascore||'—'}</td>
+    <td class="num">${r.nt}</td>
+    <td class="src">${(r.targets||[]).map(s => `<a href="https://${s.d}" target="_blank" rel="noopener">${esc(s.d)}</a>`).join(' · ')}</td>
+    <td class="num dim hideS">${/^\d{9,}$/.test(String(r.seen)) ? new Date(+r.seen * 1000).toISOString().slice(0, 10) : (esc(r.seen) || '—')}</td>
+  </tr>`).join('');
+    $('board').innerHTML = head + `<table><thead><tr><th>#</th><th>${t.c_page}</th><th>${t.c_src}</th><th>${t.c_plat}</th><th>${t.c_ascore}</th><th>${t.c_targets}</th><th>${t.c_samples}</th><th class="hideS">${t.c_seen}</th></tr></thead><tbody>${body}</tbody></table>`;
+  }
+  const inp = $('compq');
+  if (inp) inp.onchange = () => {
+    libDom = inp.value.trim().toLowerCase();
+    libRows = null;
+    if (LINKS_IDX.includes(libDom)) {
+      fetch(`data/links/${libDom}.json`).then(r => r.ok ? r.json() : []).then(rows => { libRows = rows; render(); });
+    } else if (!libDom) { render(); }
+    else { libRows = []; render(); }   // 没拉过的域:空表(拉取在推进,逐步覆盖)
+  };
+}
+
+function applyLang() {
+  document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : 'en';
+  document.querySelectorAll('[data-i18n]').forEach(e => e.textContent = I18N[LANG][e.dataset.i18n] || e.textContent);
+  document.querySelectorAll('[data-i18n-ph]').forEach(e => e.placeholder = I18N[LANG][e.dataset.i18nPh] || '');
+  $('langBtn').textContent = LANG === 'zh' ? 'EN' : '中文';
+  renderStats(); renderTabs(); renderSort(); renderChips(); render();
+}
+Promise.all([
+  fetch('data/data.json?t=' + Date.now()).then(r => r.json()),
+  fetch('data/links/index.json?t=' + Date.now()).then(r => r.json()).catch(() => []),
+]).then(([d, idx]) => {
+  DATA = d; LINKS_IDX = idx;
+  CATS = [...new Set(d.flatMap(r => r.categories || []))].sort();
+  applyLang();
+});
+$('q').oninput = e => { q = e.target.value.trim().toLowerCase(); render(); };
+$('sort').onchange = e => { sortBy = e.target.value; render(); };
+$('langBtn').onclick = () => { LANG = LANG === 'zh' ? 'en' : 'zh'; localStorage.setItem('tr_lang', LANG); applyLang(); };
+</script>
+</body>
+</html>
