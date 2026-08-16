@@ -116,6 +116,7 @@ def main():
         if prev and prev["status"] == "failed" and prev.get("note", "").endswith("×3"):
             continue
         todo.append(r)
+    todo.sort(key=lambda r: r.get("tier", 2))   # 【08-16】tier1 提交页先投
     todo = todo[:limit]
     print(f"待投 {len(todo)}(库内已有状态 {len(st)})")
     if not todo:

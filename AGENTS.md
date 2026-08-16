@@ -39,10 +39,13 @@ cp my_site.example.json my_site.json   # 必须先把示例站信息改成用户
 python3 targets.py && python3 submit.py --limit 5 --show
 ```
 
-- `my_site.json` 里的 name/url/description/email 必须替换成用户真实站点,别用示例值投
+**开工前确认用户已准备**（缺了别跑）：能收验证邮件的邮箱（自己的或 agentmail/agently 账号）、
+persona 身份（author_name/email/site）、站点简介。验证邮件需要用户人工点链接，工具不代收。
+
+- `my_site.json` 里的 name/url/description/email/persona 必须替换成用户真实信息,别用示例值投
 - 先 `--limit 5 --show` 有头验证,没问题再放量;state.jsonl 是唯一状态源,别手改
 - manual(验证码)队列就交给用户人工处理,不要尝试自动过码
-- 改表单识别逻辑在 submit.py 的 FIELD_MAP / JS_FILL
+- 改表单识别逻辑在 submit.py 的 FIELD_MAP / JS_FILL;tier 分层在 targets.py
 
 ## 数据更新
 

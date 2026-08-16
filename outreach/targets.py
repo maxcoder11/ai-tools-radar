@@ -45,11 +45,18 @@ def main():
         if dom not in best or r["ascore"] > best[dom]["ascore"]:
             best[dom] = r
     rows = sorted(best.values(), key=lambda x: -x["ascore"])[:mx]
+    # 【08-16 实测 0/8 后的修正】分两层:tier1=带提交入口的页(直接可投),
+    # tier2=高权重 blog/cms(评论/投稿机会,需要人工看一眼有没有表单)
+    SUBMIT = ("submit", "add-", "/add", "join", "register", "listing", "directory",
+              "write-for-us", "contribute", "guest", "post-a", "submit-your")
     with open(OUT, "w") as f:
         for r in rows:
+            tier = 1 if any(k in r["url"].lower() for k in SUBMIT) else 2
             f.write(json.dumps({"url": r["url"], "src": r["src"], "plat": r["plat"],
-                                "ascore": r["ascore"], "nt": r["nt"]}, ensure_ascii=False) + "\n")
-    print(f"工作清单 {len(rows)} 个目标(平台过滤+同域去重,ascore≥{min_ascore}) → {OUT}")
+                                "ascore": r["ascore"], "nt": r["nt"], "tier": tier},
+                               ensure_ascii=False) + "\n")
+    n1 = sum(1 for r in rows if any(k in r["url"].lower() for k in SUBMIT))
+    print(f"工作清单 {len(rows)} 个目标(tier1 提交页 {n1} / tier2 机会页 {len(rows) - n1}) → {OUT}")
 
 
 if __name__ == "__main__":

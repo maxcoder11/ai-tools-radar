@@ -2,14 +2,19 @@
   "name": "My AI Tool",
   "url": "https://example.com/",
   "tagline": "One-line pitch (≤80 chars)",
-  "description": "Two or three sentences about what your tool does, who it is for, and what makes it different. Used for directory description fields and comment signatures.",
-  "email": "you@example.com",
-  "twitter": "",
-  "logo_url": "",
-  "_llm_endpoint": "可选:OpenAI 兼容端点,如 http://127.0.0.1:8317/v1/chat/completions,留空=纯规则模式",
+  "description": "Two or three sentences about what your tool does, who it is for, and what makes it different.",
+  "email": "you@yourmail.com",
+  "persona": {
+    "_说明": "投放用的身份——目录站/评论区要填。别用你主身份裸奔,准备一个专门 persona",
+    "author_name": "Alex Chen",
+    "author_email": "alex.chen.dev@gmail.com",
+    "author_site": "https://example.com/"
+  },
+  "_mailbox": "【必准备】一个你能收信的邮箱(收目录站的验证/审核邮件):自己的 Gmail/QQ 邮箱,或 agentmail(agently)账号。验证邮件需要人工点链接——工具不代收",
+  "_llm": "可选:OpenAI 兼容端点+key+model,用于按目标页内容生成简介/评论(显著提升转化)",
   "llm_endpoint": "",
   "llm_key": "",
   "llm_model": "",
-  "_captcha": "可选:2Captcha key。有它才尝试过验证码;没有就进人工队列",
+  "_captcha": "可选:2Captcha/capsolver key。有了才尝试过验证码的站;没有就进人工队列",
   "capsolver_key": ""
 }
