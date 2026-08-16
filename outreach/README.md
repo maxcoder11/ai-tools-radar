@@ -84,7 +84,8 @@ state.jsonl 记 `email_verified`，卡死的 blocked 站自动回池重投；收
 node verify_link.mjs --pending                 # 核所有 pending_review/emailed/success/delivery_ambiguous
 node verify_link.mjs --pending --update-status # 确认才动状态:online+dofollow→success;
                                                # online 但 nofollow→保持 pending_review;
-                                               # offline_confirmed→failed;unknown 不动
+                                               # offline_confirmed 连续 ≥3 次才→failed(单次不判死);
+                                               # unknown 不动
 node verify_link.mjs --known                   # 复核已知链,查掉链
 node verify_link.mjs example.com               # 指定域
 ```

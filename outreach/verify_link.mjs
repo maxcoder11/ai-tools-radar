@@ -17,7 +17,8 @@
 //  - --update-status 经 state.mjs 状态守卫写回:
 //      online + dofollow → success(reason published);
 //      online 但 nofollow → 保持/回到 pending_review(上线但不传权);
-//      offline_confirmed  → failed(reason delisted,权威理由过守卫);
+//      offline_confirmed  → 累计连续次数,**≥3 次才写 failed**(reason delisted;
+//                           生产 link_facts.miss_streak 同口径:绝不用单次核验判死);
 //      unknown_*          → 不动(网络/封禁问题不是站的结论)
 //  - 代理:VERIFY_PROXY 环境变量(空串显式关),默认 HTTPS_PROXY 或直连;
 //    启动探测,代理死了自动回退直连
@@ -582,12 +583,24 @@ async function run(prod, argv) {
           evidence: `verify_link: 已收录但 rel="${r.rel}" 不传权(${r.source_url})`,
           source: 'verify_link', reason_code: 'published' });
       } else if (r.result === 'offline_confirmed') {
-        // offline_confirmed 本身有强证据门槛(sitemap 可读或 ≥10 页明确结论),
-        // 到这里说明"认真找过且没有" → failed(delisted 权威理由过守卫)。
-        // unknown_* 不动:网络/封禁问题不是站的结论,绝不用判不了的核验改状态。
-        db.upsertSubmission({ domain: dom, status: 'failed',
-          evidence: `verify_link 确认未上线(oracles: ${r.oracles_tried})`,
-          source: 'verify_link', reason_code: 'delisted' });
+        // 【生产口径,来自真实事故,勿退回单次判死】生产 dbw.recordVerification:
+        // offline_confirmed 只累加 link_facts.miss_streak,**连续 3 次才落 lost_at**
+        // —— "绝不用单次核验判死"。这里同口径:verifications.jsonl 尾部连续
+        // offline_confirmed(含本次,本次已在上面 recordVerification 落行)≥ 3 才写
+        // failed(delisted 权威理由过守卫);不足 3 次保持原状不动。
+        // unknown_* 一律不动:网络/封禁问题不是站的结论,绝不用判不了的核验改状态。
+        let streak = 0;
+        for (const row of db.verificationRows(dom).slice().reverse()) {
+          if (row.result === 'offline_confirmed') streak++;
+          else break;
+        }
+        if (streak >= 3) {
+          db.upsertSubmission({ domain: dom, status: 'failed',
+            evidence: `verify_link 连续 ${streak} 次确认未上线(oracles: ${r.oracles_tried})`,
+            source: 'verify_link', reason_code: 'delisted' });
+        } else {
+          console.log(`${' '.repeat(23)}offline_confirmed ${streak}/3,未到判死线,状态不动`);
+        }
       }
     }
   }
