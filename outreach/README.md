@@ -26,7 +26,7 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
    - `agentmail.to`：`console.agentmail.to` 注册拿 API key（am_ 开头）+
      inbox_id，填 `my_site.json` 的 `mail_backend:"agentmail"` /
      `agentmail_api_key` / `agentmail_inbox_id`（或 env `AGENTMAIL_API_KEY` /
-     `AGENTMAIL_INBOX_ID`）；REST 直连零 SDK。⚠️ 此后端按官方文档编写，**未实测**；
+     `AGENTMAIL_INBOX_ID`）；走官方 SDK（`pip install agentmail`，已实测）；
    `mail_sweeper.py` 自动收信、LLM 判意图、点验证链接
    —— 四条安全闸别动（只处理投过的域 / 链接注册域=发件域且路径含验证词 /
    跳转逐跳不出域 / message-id 幂等）；
@@ -51,6 +51,7 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 ```bash
 cd outreach
 npm install                                  # playwright-core
+pip install agentmail                        # 仅 mail_backend=agentmail 时需要(官方 SDK)
 cp my_site.example.json my_site.json         # 填 capsolver(可选);信箱走 agently-cli
 cp kit.example.json kit.json                 # 填你的产品资料(红线文案在此)
 cp identities.example.json identities.json   # 填你的 persona 池
@@ -126,7 +127,7 @@ node verify_link.mjs example.com               # 指定域
 | `capsolver.mjs` | node-tools/capsolver.js | 打码客户端（key 走 my_site.json） |
 | `creds.mjs` | node-tools/creds.js | 站点账号凭据（锁+原子写） |
 | `rootdomain.mjs` + `psl_data.json` | scripts/rootdomain.py 的 JS 版 | PSL 根域判定，数据公开 PSL |
-| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；双后端收信(agently-cli / agentmail.to REST,后者未实测) |
+| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；双后端收信(agently-cli / agentmail.to 官方 SDK) |
 | `read_otp.py` | scripts/read_otp.py | 给 agent 取验证码/验证链接 |
 | `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避/persona 轮换 |
 | `verify_link.mjs` | node-tools/verify_link.js | 终核器：四路探针 + 三态 + nofollow 判定 |

@@ -4,7 +4,7 @@
 2026-08-16 开源移植版(生产:backlinks-v2/scripts/mail_sweeper.py):
   - 取信:双后端二选一(my_site.json 的 mail_backend)——
     "agently"(默认,agent.qq.com 免费账号 + agently-cli)或
-    "agentmail"(agentmail.to REST API key,urllib 直连零 SDK;UNVERIFIED 未实测)
+    "agentmail"(agentmail.to API key + 官方 SDK `pip install agentmail`;已实测)
   - LLM 意图分类:私有网关 → LLM_ENDPOINT/LLM_KEY/LLM_MODEL 环境变量
     (OpenAI 兼容端点,降级链 LLM_FALLBACKS 逗号分隔)
   - 账本:私仓 SQLite → state.py(state.jsonl + constraints/human_tasks/mail_seen)
@@ -238,10 +238,9 @@ def llm_judge(frm, subj, body_txt):
 #   agently   —— agent.qq.com 账号 + agently-cli auth login(子进程调 CLI)
 #   agentmail —— console.agentmail.to 注册拿 API key(am_ 开头)+ inbox_id,
 #                配 my_site.json 的 agentmail_api_key/agentmail_inbox_id
-#                (或 env AGENTMAIL_API_KEY/AGENTMAIL_INBOX_ID),urllib 直连 REST,零 SDK
+#                (或 env AGENTMAIL_API_KEY/AGENTMAIL_INBOX_ID),官方 SDK(pip install agentmail)
 # 幂等键统一 = 各后端的 message_id。两个抽象 list_msgs()/read_msg(mid) 签名不变。
-#
-# UNVERIFIED:agentmail 后端按官方 API 文档编写,我们没有它的 key,未对真实服务跑过。
+# agentmail 后端 2026-08-16 已用真实 key 实测(list/read 通过)。
 
 def _mail_cfg():
     c = {}
@@ -314,65 +313,75 @@ def _read_msg_agently(mid):
     return text[:20000], tos
 
 
-# ==================== 后端 B:agentmail.to(REST,零 SDK)====================
-# UNVERIFIED(2026-08-16):以下按官方文档编写(GET /v0/inboxes/{inbox}/messages,
-# Bearer key;429 带 Retry-After;4xx/5xx 看 body.message),未对真实服务实测。
+# ==================== 后端 B:agentmail.to(官方 SDK)====================
+# 用法与生产 backlinks-v2/scripts/mail_sweeper.py 同一路(那边生产在跑)。
+# 2026-08-16 已实测(list/read 真 key 通过)。为什么不用手搓 REST:
+# list 返回的 message_id 是 RFC2822 格式(<xxx@smtp-relay...>),直接拼进
+# GET 路径会 400/404,要 URL 编码——这类坑 SDK 自己处理。
+# SDK 依赖:pip install agentmail(见 README 安装命令)。
 
-AGENTMAIL_API = "https://api.agentmail.to/v0"
 AGENTMAIL_SETUP_GUIDE = (
     "agentmail.to 收信通道未就绪。准备步骤:\n"
     "  1. console.agentmail.to 免费注册,拿 API key(am_ 开头)\n"
     "     (或 npm i -g agentmail-cli && agentmail agent sign-up)\n"
-    "  2. my_site.json 填 agentmail_api_key + agentmail_inbox_id\n"
+    "  2. pip install agentmail\n"
+    "  3. my_site.json 填 agentmail_api_key + agentmail_inbox_id\n"
     "     (或 env AGENTMAIL_API_KEY / AGENTMAIL_INBOX_ID)"
 )
 
+_am = None
 
-def _agentmail_get(path, timeout=30):
-    """UNVERIFIED。GET agentmail.to REST;429 读 Retry-After 抛限频,4xx/5xx 取 body.message。"""
-    c = _mail_cfg()
-    req = urllib.request.Request(AGENTMAIL_API + path, headers={
-        "Authorization": "Bearer " + c["agentmail_key"], "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        msg = ""
+
+def _am_client():
+    global _am
+    if _am is None:
         try:
-            msg = (json.loads(e.read()) or {}).get("message") or ""
-        except Exception:
-            pass
-        if e.code == 429:
-            raise CliRateLimited(f"agentmail 限频(Retry-After {e.headers.get('Retry-After', '?')}s):{msg}")
-        if e.code in (401, 403):
-            raise CliAuthError(f"agentmail key 无效(HTTP {e.code}):{msg}\n{AGENTMAIL_SETUP_GUIDE}")
-        raise RuntimeError(f"agentmail GET {path} 失败(HTTP {e.code}):{msg}")
+            from agentmail import AgentMail
+        except ImportError:
+            raise RuntimeError("缺 agentmail SDK:pip install agentmail\n" + AGENTMAIL_SETUP_GUIDE)
+        c = _mail_cfg()
+        _am = (AgentMail(api_key=c["agentmail_key"]), c["agentmail_inbox"])
+    return _am
+
+
+def _am_map_error(e, what):
+    """SDK 异常映射到我们的大小类:429 限频 / 401·403 授权。其余原样上抛。"""
+    code = getattr(e, "status_code", None) or getattr(e, "status", None)
+    msg = str(e)[:200]
+    if code == 429:
+        return CliRateLimited(f"agentmail 限频:{msg}")
+    if code in (401, 403):
+        return CliAuthError(f"agentmail key 无效:{msg}\n{AGENTMAIL_SETUP_GUIDE}")
+    return RuntimeError(f"agentmail {what} 失败:{type(e).__name__}: {msg}")
 
 
 def _list_msgs_agentmail(limit, max_pages):
-    """UNVERIFIED。信封字段:message_id/from/subject/preview/created_at;
-    翻页 page_token → next_page_token。"""
-    c = _mail_cfg()
-    inbox = c["agentmail_inbox"]
+    """信封字段:message_id/from_/subject/preview/created_at;
+    翻页 page_token → next_page_token(与生产同写法)。"""
+    client, inbox = _am_client()
     out, token, pages = [], None, 0
     while pages < max(1, max_pages) and len(out) < limit:
-        q = f"?limit={min(50, limit - len(out))}"
-        if token:
-            q += f"&page_token={token}"
-        d = _agentmail_get(f"/inboxes/{inbox}/messages{q}", timeout=60)
-        for m in (d.get("messages") or []):
-            frm = m.get("from") or ""
-            frm_email = frm.get("email", "") if isinstance(frm, dict) else str(frm)
+        try:
+            res = (client.inboxes.messages.list(inbox, limit=min(50, limit - len(out)),
+                                                page_token=token)
+                   if token else
+                   client.inboxes.messages.list(inbox, limit=min(50, limit - len(out))))
+        except Exception as e:
+            raise _am_map_error(e, "list")
+        for m in (getattr(res, "messages", None) or []):
+            frm = getattr(m, "from_", "") or ""
+            if not isinstance(frm, str):
+                frm = getattr(frm, "email", "") or str(frm)
             # 自己发出的信不是来信,跳过(inbox_id 即本信箱地址)
-            if frm_email and inbox and inbox.lower() in frm_email.lower():
+            if frm and inbox and inbox.lower() in frm.lower():
                 continue
-            out.append({"mid": m.get("message_id") or "",
-                        "from": frm_email,
-                        "subject": m.get("subject") or "",
-                        "snippet": m.get("preview") or "",
-                        "date": str(m.get("created_at") or "")})
+            out.append({"mid": str(getattr(m, "message_id", "") or ""),
+                        "from": frm,
+                        "subject": getattr(m, "subject", "") or "",
+                        "snippet": getattr(m, "preview", "") or "",
+                        "date": str(getattr(m, "created_at", "") or "")})
         pages += 1
-        token = d.get("next_page_token")
+        token = getattr(res, "next_page_token", None)
         if not token:
             break
     else:
@@ -382,14 +391,20 @@ def _list_msgs_agentmail(limit, max_pages):
 
 
 def _read_msg_agentmail(mid):
-    """UNVERIFIED。响应含 text/html/extracted_text 字段。"""
-    c = _mail_cfg()
-    m = _agentmail_get(f"/inboxes/{c['agentmail_inbox']}/messages/{mid}", timeout=60)
-    text = " ".join([m.get("subject") or "", m.get("extracted_text") or "",
-                     m.get("text") or "", m.get("html") or ""])
+    """响应取 subject + extracted_text + html(与生产 read_msg 同字段)。"""
+    client, inbox = _am_client()
+    try:
+        m = client.inboxes.messages.get(inbox, mid)
+    except Exception as e:
+        raise _am_map_error(e, "get")
+    text = " ".join([getattr(m, "subject", "") or "",
+                     getattr(m, "extracted_text", "") or "",
+                     getattr(m, "text", "") or "",
+                     getattr(m, "html", "") or ""])
     tos = []
-    for t in (m.get("to") or []):
-        e = t.get("email", "") if isinstance(t, dict) else str(t)
+    for t in (getattr(m, "to", None) or []):
+        e = t if isinstance(t, str) else (getattr(t, "email", "")
+              or (t.get("email", "") if isinstance(t, dict) else ""))
         if e:
             tos.append(e)
     return text[:20000], tos
@@ -976,8 +991,9 @@ def preflight():
             missing.append("agentmail_config")
         else:
             try:
-                # UNVERIFIED:自检调用(list 1 条)按官方文档编写,未对真实服务实测
-                _agentmail_get(f"/inboxes/{mc['agentmail_inbox']}/messages?limit=1", timeout=30)
+                # 自检:list 1 条(SDK 与 key/inbox 一起验)
+                client, inbox = _am_client()
+                client.inboxes.messages.list(inbox, limit=1)
             except (CliAuthError, CliRateLimited) as e:
                 log(f"⚠️ agentmail 自检失败:{e}")
                 missing.append("agentmail_auth")
