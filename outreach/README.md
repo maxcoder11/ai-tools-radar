@@ -62,8 +62,35 @@ python3 mail_sweeper.py --loop               # 常驻:自动收信点验证链�
 
 **完整闭环**：driver.py 投放 → 站点发验证邮件 → mail_sweeper.py 收信点链接 →
 state.jsonl 记 `email_verified`，卡死的 blocked 站自动回池重投；收录通过/拒绝的
-来信按 LLM 意图分类写回（pending_review/failed/skipped_badge）。每天看一眼
-state.jsonl 和 human_tasks.jsonl 就知道战果和待办。
+来信按 LLM 意图分类写回（pending_review/failed/skipped_badge）→ **verify_link.mjs
+终核**确认链接真的上线（见下节）。每天看一眼 state.jsonl 和 human_tasks.jsonl
+就知道战果和待办。
+
+## 终核（verify_link.mjs）
+
+`pending_review` 只是"站方说收到了/来信说收录了"，不算上线。终核器用**确定性判据**
+收口：页面上有没有指向你域的 `<a href>`（不问 LLM，顺手消除"搜索页回显被当成
+上线"的假阳性）。
+
+- 四路探针：已记录 URL → sitemap → 站内搜索 → 路径枚举；`oracles_tried` 记录
+  试过哪些，证明 offline 是真的找过而不是没找到；
+- 三态：`online` / `offline_confirmed`（sitemap 可读或 ≥10 页明确结论才判）/
+  `unknown_network` / `unknown_blocked` —— 判不了的绝不写成"未上线"；
+- SEO 价值字段：rel（**nofollow 判定**）、meta robots、X-Robots-Tag、canonical、
+  跳转落地；侧栏/widget 回显锚不算收录证据；
+- 每次核验追加 `verifications.jsonl`（默认只读，不动状态）。
+
+```bash
+node verify_link.mjs --pending                 # 核所有 pending_review/emailed/success/delivery_ambiguous
+node verify_link.mjs --pending --update-status # 确认才动状态:online+dofollow→success;
+                                               # online 但 nofollow→保持 pending_review;
+                                               # offline_confirmed→failed;unknown 不动
+node verify_link.mjs --known                   # 复核已知链,查掉链
+node verify_link.mjs example.com               # 指定域
+```
+
+建议投放后每周跑一次 `--pending --update-status`，每天跑一次 `--known`（掉链监控）。
+口径对应：`success` = 终核在线且 dofollow；这是 README 里"~1% 终核上线"的"终核"。
 
 ## 状态口径（与生产一致）
 
@@ -78,8 +105,8 @@ state.jsonl 和 human_tasks.jsonl 就知道战果和待办。
 
 账本文件（全部 gitignore）：`state.jsonl`（当前态投影）/ `events.jsonl`（事件）/
 `costs.jsonl`（LLM+打码花费）/ `constraints.jsonl`（站点约束带 TTL）/
-`human_tasks.jsonl`（人工队列）/ `recipes.json`（打法沉淀）/ `creds.json`
-（站点注册账号，排他锁+原子写）。
+`human_tasks.jsonl`（人工队列）/ `recipes.json`（打法沉淀）/
+`verifications.jsonl`（终核记录）/ `creds.json`（站点注册账号，排他锁+原子写）。
 
 ## 文件对应（移植自生产管道）
 
@@ -96,8 +123,22 @@ state.jsonl 和 human_tasks.jsonl 就知道战果和待办。
 | `rootdomain.mjs` + `psl_data.json` | scripts/rootdomain.py 的 JS 版 | PSL 根域判定，数据公开 PSL |
 | `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；agently-cli 收信(免费 AgentMail 账号) |
 | `read_otp.py` | scripts/read_otp.py | 给 agent 取验证码/验证链接 |
-| `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避 |
+| `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避/persona 轮换 |
+| `verify_link.mjs` | node-tools/verify_link.js | 终核器：四路探针 + 三态 + nofollow 判定 |
 | `esp_hosts.json` | scripts/esp_hosts.json | ESP 跳转域白名单（唯一来源） |
+
+### driver.py 对照生产 rolling_submit.py 的取舍
+
+**已带（生产能力）**：每域每天一次、域间 20-40s、persona 按域 hash 轮换 +
+评论作者网址池（`AUTHOR_URL_POOL`，评论腿注入 IDENTITY_FORCE，目录腿不覆盖）、
+429/LLM 瞬态退避 60s、打码预算熔断停波（exit 42）、写账失败不补记（exit 43）、
+无声退出兜底补记 blocked（SILENT_SKIP_MARKERS 豁免）、900s 包装超时补记、
+逐域完整日志落 `run/agent_logs/`。
+
+**未包含（私有基建，不带）**：代理节点池轮换（mihomo/Surge，本机 7891/8234）、
+CF 签名站的住宅出口重投与 cloak 指纹内核救援（依赖私有二进制和家庭宽带出口）、
+远程核验模式（VERIFY_JOB）。这些与你的网络环境强绑定，开源版用 `HTTPS_PROXY`
+单代理替代；CF 挑战多的话自己配静态住宅代理。
 
 ## 纪律（踩过的坑沉淀）
 

@@ -5,15 +5,23 @@
   - 每域每天最多一次(state.jsonl 当天有行即跳过);终端态
     (success/pending_review/emailed/manual/skipped_*/delivery_ambiguous/done)不再重投
   - 域间 20-40s 随机间隔(纪律:不连投)
+  - persona 轮换(生产能力):评论腿(blog/forum/mb 页)按域 hash 从 identities.json
+    抽 persona + 作者网址池(AUTHOR_URL_POOL)轮换,注入 IDENTITY_FORCE;
+    目录腿不覆盖(目录链必须指主域)。agent_submit.mjs 内部另有按域 hash 的
+    自动抽取兜底,驱动这层只管"评论作者网址多落点"
   - agent exit 42 = 打码日预算熔断:停波,别把剩下的验证码域逐个空跑
   - LLM 瞬态(429/限流/网络抖动):不是站的错,域不落账,退避 60s 后继续
   - 无声退出兜底:agent 无论因何没留 state 行(静默崩溃),补记 blocked;
     但 SILENT_SKIP_MARKERS 的路径是 agent 故意干净退出(域留池),不补记
   - 包装超时(900s 硬顶):补记 blocked,防僵尸域每波被重选白烧
+未包含(私有基建,见 README「未包含」):代理节点轮换(mihomo/Surge)、
+  CF 签名住宅出口重投、cloak 指纹内核救援。
 用法:
   python3 driver.py [--limit 20] [--steps 24] [--loop]
-环境变量:LLM_ENDPOINT/LLM_KEY/LLM_MODEL 必配;HTTPS_PROXY 可选;NODE_BIN 指定 node。
+环境变量:LLM_ENDPOINT/LLM_KEY/LLM_MODEL 必配;HTTPS_PROXY 可选;NODE_BIN 指定 node;
+  AUTHOR_URL_POOL 逗号分隔的评论作者网址池(默认只有 kit 主域)。
 """
+import hashlib
 import json
 import os
 import random
@@ -37,6 +45,43 @@ SILENT_SKIP_MARKERS = ("LLM 瞬态", "基建故障", "预算熔断", "LEDGER_WRI
 TERMINAL = ("success", "pending_review", "emailed", "manual",
             "skipped_paid", "skipped_badge", "skipped_fit",
             "delivery_ambiguous", "done", "done_unverified", "approved")
+
+# 评论腿识别:worklist 的 plat 含这些平台分类的页,投的是评论/社区场景
+COMMENT_PLAT = ("blog", "forum", "mb")
+
+
+def _h(domain):
+    return int(hashlib.md5(domain.encode()).hexdigest(), 16)
+
+
+def _personas():
+    """persona 池(identities.json)。读不到返回 None —— 不强制:
+    agent_submit.mjs 内部还有一层按域 hash 的自动抽取(带响亮告警)。"""
+    try:
+        pool = json.load(open(HERE / "identities.json"))
+        pool = [p for p in pool if p.get("name") and p.get("email")]
+        return pool or None
+    except Exception:
+        return None
+
+
+def _url_pool():
+    """评论作者网址池:env AUTHOR_URL_POOL(逗号分隔)> kit 主域单落点。
+    生产是 主域50%/卫星博客各25% 的三落点轮换,破跨站签名;没有卫星落点就主域。"""
+    env = os.environ.get("AUTHOR_URL_POOL", "").strip()
+    if env:
+        pool = [u.strip() for u in env.split(",") if u.strip()]
+        if pool:
+            return pool
+    try:
+        u = json.load(open(KIT))["product"]["url"].rstrip("/") + "/"
+        return [u]
+    except Exception:
+        return []
+
+
+PERSONAS = _personas()
+URL_POOL = _url_pool()
 
 
 class BudgetStop(Exception):
@@ -83,6 +128,13 @@ def pick_batch(limit):
 def run_site(r, steps):
     dom, url = r["src"], r["url"]
     env = dict(os.environ, SUBMIT_MAX_MINUTES="10")
+    # persona 轮换(评论腿):按域 hash 固定抽 persona + 作者网址池轮换,
+    # 破 Akismet 跨站签名;目录腿不覆盖(目录链必须指主域)。
+    plat = r.get("plat") or ""
+    if any(p in plat for p in COMMENT_PLAT) and PERSONAS and URL_POOL:
+        p = PERSONAS[_h(dom) % len(PERSONAS)]
+        u = URL_POOL[_h(dom) % len(URL_POOL)]
+        env["IDENTITY_FORCE"] = f"{p['name']}|{p['email']}|{u}"
     print(f"[{time.strftime('%H:%M:%S')}] {dom} ⇠ {url[:60]}", flush=True)
     try:
         p = subprocess.run([NODE, str(HERE / "agent_submit.mjs"), url,

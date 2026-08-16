@@ -316,3 +316,48 @@ export function saveRecipe(domain, recipe, status, notes) {
   fs.writeFileSync(tmp, JSON.stringify(all, null, 1));
   fs.renameSync(tmp, RECIPES_FILE);   // 同盘 rename 原子
 }
+
+// ---------- 终核(verify_link.mjs 用)----------
+// verifications.jsonl:每次核验一行(三态结果 + SEO 价值字段),对应生产的
+// verification_runs 表;"已知链"(--known 复核)就从这个日志里折叠。
+const VERIFICATIONS_FILE = path.join(DIR, 'verifications.jsonl');
+const VERIFY_RESULTS = new Set(['online', 'offline_confirmed', 'unknown_network', 'unknown_blocked']);
+
+/** 该域的 state.jsonl 全部行(按写入顺序),终核器从 evidence/note 里抠历史收录页 URL。 */
+export function stateRows(domain) {
+  let dom;
+  try { dom = canonDomain(domain); } catch { return []; }
+  return readJsonl(STATE_FILE).filter(r => r.src === dom);
+}
+
+/** 当前态落在 statuses 里的全部域名(--pending 的待核清单)。 */
+export function domainsWithStatus(statuses) {
+  const want = statuses instanceof Set ? statuses : new Set(statuses);
+  const latest = new Map();
+  for (const r of readJsonl(STATE_FILE)) if (r.src) latest.set(r.src, r.status);
+  return [...latest.entries()].filter(([, s]) => want.has(s)).map(([d]) => d).sort();
+}
+
+/** 记一次核验。result 必须是三态之一;只追加日志,不动任何状态(状态归 --update-status 管)。 */
+export function recordVerification({ domain, result, ...rest }) {
+  if (!VERIFY_RESULTS.has(result)) throw new Error(`state: 未知核验结果: ${result}`);
+  append(VERIFICATIONS_FILE, {
+    domain: canonDomain(domain), result, ...rest, ts: nowUtc(),
+  });
+}
+
+/** 该域的全部核验记录(按写入顺序),终核器从里面取历史 online 的 source_url。 */
+export function verificationRows(domain) {
+  let dom;
+  try { dom = canonDomain(domain); } catch { return []; }
+  return readJsonl(VERIFICATIONS_FILE).filter(r => r.domain === dom);
+}
+
+/** 有过 online 核验记录的全部域名(--known 的复核清单,查掉链)。 */
+export function knownOnlineDomains() {
+  const doms = new Set();
+  for (const r of readJsonl(VERIFICATIONS_FILE)) {
+    if (r.result === 'online' && r.domain) doms.add(r.domain);
+  }
+  return [...doms].sort();
+}

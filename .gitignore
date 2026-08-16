@@ -16,3 +16,4 @@ outreach/human_tasks.jsonl
 outreach/mail_seen.jsonl
 outreach/recipes.json
 outreach/.creds.lock*
+outreach/verifications.jsonl

@@ -53,6 +53,8 @@ persona 身份池（identities.json）、产品资料包（kit.json）。
   四条安全闸别动）；先 `--dry-run` 演一遍再放--loop
 - 验证码站没配 capsolver_key 会标 manual 进 human_tasks.jsonl，人工处理，不要尝试自动过码
 - delivery_ambiguous = 提交可能已投达但终局未定，永不自动重投，只能人工裁决
+- pending_review ≠ 上线：终核器 `verify_link.mjs --pending --update-status` 确认在线且
+  dofollow 才抬 success（offline_confirmed→failed，unknown 不动）；建议每周跑一次
 - LLM 端点/打码 key/代理全走环境变量或 my_site.json；私仓的任何 key/产品资料不得进本目录
 
 ## 数据更新
