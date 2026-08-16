@@ -20,16 +20,15 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 1. **OpenAI 兼容 LLM 端点**（必填）：环境变量 `LLM_ENDPOINT` / `LLM_KEY` /
    `LLM_MODEL`（可选降级链 `LLM_FALLBACKS`，逗号分隔）。提交代理每一步都靠它决策，
    邮件理解也靠它判意图；
-2. **一个 AgentMail 信箱，二选一**（都免费，收验证/审核邮件）：
-   - `agent.qq.com`（默认）：注册账号 → `npm install -g @tencent-qqmail/agently-cli`
+2. **收信信箱，两条腿至少通一条**（都免费，收验证/审核邮件）：
+   - `agent.qq.com`：注册账号 → `npm install -g @tencent-qqmail/agently-cli`
      → `agently-cli auth login` 授权一次（`auth status` 可查状态）；
    - `agentmail.to`：`console.agentmail.to` 注册拿 API key（am_ 开头）+
-     inbox_id，填 `my_site.json` 的 `mail_backend:"agentmail"` /
-     `agentmail_api_key` / `agentmail_inbox_id`（或 env `AGENTMAIL_API_KEY` /
-     `AGENTMAIL_INBOX_ID`）；走官方 SDK（`pip install agentmail`，已实测）；
-   `mail_sweeper.py` 自动收信、LLM 判意图、点验证链接
-   —— 四条安全闸别动（只处理投过的域 / 链接注册域=发件域且路径含验证词 /
-   跳转逐跳不出域 / message-id 幂等）；
+     inbox_id，填 `my_site.json` 的 `agentmail_api_key` / `agentmail_inbox_id`
+     （或 env `AGENTMAIL_API_KEY` / `AGENTMAIL_INBOX_ID`）+ `pip install agentmail curl_cffi`；
+   一条腿不通会降级打日志，不影响另一条。`mail_sweeper.py` 自动收信、LLM 判意图、
+   点验证链接 —— 四条安全闸别动（只处理投过的域 / 链接注册域=发件域且路径含
+   验证词 / 跳转逐跳不出域 / message-id 幂等）；
 3. **产品资料包**：`cp kit.example.json kit.json`，把产品名/URL/文案槽位/
    forbidden_claims 全部换成你的真实资料；`submitter.email` 必须落进上面的 AgentMail
    信箱（验证码发到这）；
@@ -51,7 +50,7 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 ```bash
 cd outreach
 npm install                                  # playwright-core
-pip install agentmail                        # 仅 mail_backend=agentmail 时需要(官方 SDK)
+pip install agentmail curl_cffi            # mail_sweeper 收信/点链依赖(两条腿共用)
 cp my_site.example.json my_site.json         # 填 capsolver(可选);信箱走 agently-cli
 cp kit.example.json kit.json                 # 填你的产品资料(红线文案在此)
 cp identities.example.json identities.json   # 填你的 persona 池
@@ -127,7 +126,8 @@ node verify_link.mjs example.com               # 指定域
 | `capsolver.mjs` | node-tools/capsolver.js | 打码客户端（key 走 my_site.json） |
 | `creds.mjs` | node-tools/creds.js | 站点账号凭据（锁+原子写） |
 | `rootdomain.mjs` + `psl_data.json` | scripts/rootdomain.py 的 JS 版 | PSL 根域判定，数据公开 PSL |
-| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；双后端收信(agently-cli / agentmail.to 官方 SDK) |
+| `mail_sweeper.py` | scripts/mail_sweeper.py | **生产文件逐字复制 + 最小改动**(LLM env 化/DB→state.jsonl/凭据入 my_site.json) |
+| `dbwpy.py` | scripts/dbwpy.py | 兼容层:生产 API 面落 state.jsonl,sweeper 调用点零改动 |
 | `read_otp.py` | scripts/read_otp.py | 给 agent 取验证码/验证链接 |
 | `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避/persona 轮换 |
 | `verify_link.mjs` | node-tools/verify_link.js | 终核器：四路探针 + 三态 + nofollow 判定 |

@@ -193,12 +193,16 @@ def human_task_add(domain, url="", blocker="", guidance="", payload=None):
 CLAIM_TTL = 900     # 认领 900s 未完成自动释放(进程崩溃兜底)
 
 def _mail_fold():
-    done, claimed = {}, {}
+    done, claimed, domains = {}, {}, {}
     for r in _read_jsonl(MAIL_SEEN_FILE):
         mid, ev = r.get("mid"), r.get("event")
+        if r.get("domain"):
+            domains[mid] = r["domain"]        # claim/set_domain/done 都可更新归属
         if ev == "claim":
             claimed[mid] = r
         elif ev == "done":
+            if not r.get("domain") and domains.get(mid):
+                r["domain"] = domains[mid]    # 继承认领/归属时记下的域
             done[mid] = r
             claimed.pop(mid, None)
         elif ev == "release":
@@ -217,6 +221,17 @@ def mail_claim(mid, worker, domain=None):
     _append(MAIL_SEEN_FILE, {"mid": mid, "event": "claim", "worker": worker,
                              "domain": domain, "epoch": time.time(), "ts": now_utc()})
     return True
+
+
+def mail_set_domain(mid, domain):
+    """归属落库:这封信对应的站(LLM 判出后发件人域之外的修正也走这)。
+    等待器(sweep_for)的水位线按这个域过滤。"""
+    try:
+        domain = canon_domain(domain)
+    except ValueError:
+        pass
+    _append(MAIL_SEEN_FILE, {"mid": mid, "event": "set_domain", "domain": domain,
+                             "epoch": time.time(), "ts": now_utc()})
 
 
 def mail_done(mid, domain=None):
@@ -244,3 +259,20 @@ def mail_recent_done(domain, within_sec=900):
     t0 = time.time() - within_sec
     return sum(1 for r in done.values()
                if r.get("domain") == dom and float(r.get("epoch", 0)) >= t0)
+
+
+def mail_done_max_epoch():
+    """水位线基线:已处理完的信里最大的 epoch(对应生产 mail_done_max_rowid)。"""
+    done, _ = _mail_fold()
+    return max((float(r.get("epoch", 0)) for r in done.values()), default=0.0)
+
+
+def mail_done_since(domain, base_epoch):
+    """base_epoch 之后处理完的、归属该域的信封数(对应生产 rowid 水位线 COUNT)。"""
+    try:
+        dom = canon_domain(domain)
+    except ValueError:
+        dom = str(domain or "").lower()
+    done, _ = _mail_fold()
+    return sum(1 for r in done.values()
+               if r.get("domain") == dom and float(r.get("epoch", 0)) > float(base_epoch))

@@ -43,9 +43,10 @@ python3 targets.py && python3 driver.py --limit 5
 ```
 
 **开工前确认用户已准备**（缺了别跑）：OpenAI 兼容 LLM 端点（LLM_* 环境变量）、
-AgentMail 信箱（二选一，都免费：agent.qq.com 走 agently-cli `auth login`；
-agentmail.to 拿 API key 填 my_site.json 的 agentmail_* 字段 + `pip install agentmail`）、
+收信信箱（两条腿至少通一条，都免费：agent.qq.com 走 agently-cli `auth login`；
+agentmail.to 拿 API key 填 my_site.json 的 agentmail_* 字段 + `pip install agentmail curl_cffi`）、
 persona 身份池（identities.json）、产品资料包（kit.json）。
+mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读文件头移植说明。
 
 - kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投
 - 先 `driver.py --limit 5` 小批验证，没问题再放量；state.jsonl 是唯一状态源，别手改
