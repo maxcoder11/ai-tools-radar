@@ -4,7 +4,7 @@
 
 ## 开工前必须准备（缺了别跑）
 
-1. **一个能收信的邮箱**：目录站提交后会发验证/审核邮件，需要你去点链接。自己的 Gmail/QQ 邮箱即可，或注册一个 agentmail(agently) 账号专门收。**工具不代收邮件**——验证环节是你的人工步骤
+1. **一个能收信的邮箱 + 它的 IMAP 配置**：目录站提交后发验证/审核邮件，`mailbot.py` 自动收、自动点验证链接（安全闸：只处理投过的域、链接不出域、幂等）。自己的 Gmail（应用专用密码）/QQ 邮箱（授权码）即可，或注册 agentmail(agently) 账号专门收
 2. **一套 persona 身份**：投放用的名字/邮箱/个人网址（`my_site.json` 的 `persona` 段）。别用主身份裸奔；量大的话准备 2-3 套轮换（同域同 persona，防标记）
 3. **你的站点资料**：名称、URL、一句话卖点、两三句简介（填 `my_site.json`）
 4. 浏览器：`playwright install chromium`，或设 `CHROME_BIN` 指向本机已有 Chrome/Chromium
@@ -22,7 +22,11 @@ cp my_site.example.json my_site.json   # 填好上面的准备项
 python3 targets.py                     # 生成 worklist.jsonl(tier1 提交页优先)
 python3 submit.py --limit 5 --show     # 先 5 个有头模式亲眼验证
 python3 submit.py --limit 50           # 没问题再放量
+python3 mailbot.py --loop              # 常驻:自动收验证邮件、点验证链接
 ```
+
+**完整闭环**：submit.py 投放 → 站点发验证邮件 → mailbot.py 自动收信点链接 → state.jsonl 记 `email_verified`。
+收录通过/拒绝的邮件也会按规则分类记录（approved/rejected），每天看一眼 state.jsonl 就知道战果。
 
 ## 工作原理
 

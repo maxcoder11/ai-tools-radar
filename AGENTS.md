@@ -44,6 +44,7 @@ persona 身份（author_name/email/site）、站点简介。验证邮件需要�
 
 - `my_site.json` 里的 name/url/description/email/persona 必须替换成用户真实信息,别用示例值投
 - 先 `--limit 5 --show` 有头验证,没问题再放量;state.jsonl 是唯一状态源,别手改
+- 提交后验证邮件由 `mailbot.py` 自动处理(IMAP 收信+点验证链接,四条安全闸别动);用户只需提供 IMAP 配置
 - manual(验证码)队列就交给用户人工处理,不要尝试自动过码
 - 改表单识别逻辑在 submit.py 的 FIELD_MAP / JS_FILL;tier 分层在 targets.py
 
