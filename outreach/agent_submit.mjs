@@ -220,7 +220,7 @@ const VALUES = {
   desc_long: KIT.copy.descriptions.l_510[0], tags: KIT.product.tags.join(', '),
   categories: KIT.product.categories.join(', '), logo: KIT.product.og_image,
   // 收验证码/验证信的受控邮箱:env AGENT_EMAIL > kit submitter.email。
-  // 必须与 mail_sweeper.py 读的 IMAP 信箱是同一个,否则 email_otp 永远等不到信。
+  // 必须与 mail_sweeper.py 读的 AgentMail 信箱(agently-cli)是同一个,否则 email_otp 永远等不到信。
   agent_email: process.env.AGENT_EMAIL || (KIT.product.submitter && KIT.product.submitter.email) || '',
 };
 // 【08-01 用户定·反检测】身份轮换:每个域固定抽一个 persona(同域稳定、跨域轮换),
@@ -290,7 +290,7 @@ function domainPassword(dom, accountEmail) {
 function forkAccountForProduct(dom, reason) {
   // 产品专属账号必须配**产品自己的**邮箱,否则站方看到的还是同一个地址,
   // 一账号一产品的限制根本没绕过(Codex 2026-07-26 [P1])。
-  // 这个地址来自 kit 的 submitter.email(如 contact@<产品域>,转发进你的 IMAP 信箱),
+  // 这个地址来自 kit 的 submitter.email(如 contact@<产品域>,转发进你的 AgentMail 信箱),
   // 天然按产品不同(见 creds.mjs 的账号键策略注释)。
   const productEmail = (KIT.product.submitter && KIT.product.submitter.email) || '';
   if (!productEmail || productEmail === VALUES.agent_email) {
@@ -537,7 +537,7 @@ function deferMark(dom) {
 
 function emailOtp(dom) {
   // 【2026-07-29 改】原实现直接 exec agently-cli —— 也就是**只读 QQ 信箱**。
-  // 注册身份换成产品联系邮箱(如 contact@<产品域>,转发进 IMAP 信箱)
+  // 注册身份换成产品联系邮箱(如 contact@<产品域>,转发进 AgentMail 信箱)
   // 之后,验证码会落到 AgentMail 而这里还在 QQ 里找,每个需要填验证码的站
   // 都会卡在"未找到来信"直到步数烧完。换身份和换取信通道必须同时做。
   //

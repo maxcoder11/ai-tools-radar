@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""read_otp.py — 从 IMAP 信箱里取某个站的验证码/验证链接,给投放 agent 用。
+"""read_otp.py — 从 AgentMail 信箱(agently-cli)取某个站的验证码/验证链接,给投放 agent 用。
 
 2026-08-16 开源移植版(生产:backlinks-v2/scripts/read_otp.py)。
 
 ## 为什么不在 JS 里再写一遍
 
-信箱访问只应该有一份实现。mail_sweeper 已经把 IMAP 连接、字段兼容、
+信箱访问只应该有一份实现。mail_sweeper 已经把 agently-cli 调用、字段兼容、
 message_id 幂等这些坑都踩平了,再抄一份 JS 版必然分叉。
 这里直接复用它的 list_msgs()/read_msg()。
 
@@ -82,7 +82,7 @@ def find_otp(dom, limit=25, since=None):
         return f"未找到 {dom_root} 的来信(信箱共读 {len(msgs)} 封,可能还没到){tail}", False
 
     for m in hits:
-        # 先看主题,不够再拉全文 —— 全文要多一次 IMAP 往返
+        # 先看主题+摘要,不够再拉全文 —— 全文要多一次 CLI 往返
         for text in (f"{m.get('subject','')} {m.get('snippet','')}", None):
             if text is None:
                 try:
@@ -101,7 +101,7 @@ def find_otp(dom, limit=25, since=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="从 IMAP 信箱取某站的验证码/验证链接")
+    ap = argparse.ArgumentParser(description="从 AgentMail 信箱取某站的验证码/验证链接")
     ap.add_argument("--domain", required=True)
     ap.add_argument("--limit", type=int, default=25)
     ap.add_argument("--since", default=None,

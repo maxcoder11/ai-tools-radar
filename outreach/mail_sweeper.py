@@ -2,8 +2,8 @@
 """mail_sweeper.py — 邮件理解与处置(常驻/单跑)。外链投放管道组成部分。
 
 2026-08-16 开源移植版(生产:backlinks-v2/scripts/mail_sweeper.py):
-  - 取信:agently-cli/AgentMail 双信箱 → 标准 IMAP(stdlib imaplib,零安装),
-    配置在 my_site.json 的 imap_host/imap_user/imap_pass(或 env IMAP_HOST/USER/PASS)
+  - 取信:agently-cli(subprocess 调公开 CLI,用户注册免费 AgentMail 账号
+    agent.qq.com + `agently-cli auth login` 授权一次即可)
   - LLM 意图分类:私有网关 → LLM_ENDPOINT/LLM_KEY/LLM_MODEL 环境变量
     (OpenAI 兼容端点,降级链 LLM_FALLBACKS 逗号分隔)
   - 账本:私仓 SQLite → state.py(state.jsonl + constraints/human_tasks/mail_seen)
@@ -22,17 +22,16 @@
 用法: python3 mail_sweeper.py [--loop] [--dry-run] [--for-domain x.com --wait 90]
 """
 import fcntl
-import imaplib
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
 import urllib.request
-from email import message_from_bytes
-from email.header import decode_header
 from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +40,6 @@ import state as st  # noqa: E402
 from rootdomain import host_of as _host, root_domain as _root_domain  # noqa: E402
 
 RUN_DIR = os.path.join(HERE, "run")
-STATE_JSON = os.path.join(HERE, "my_site.json")
 LOG = os.path.join(RUN_DIR, "_sweeper.log")
 # 锁文件可用 SWEEPER_LOCK 换掉 —— 测试要在隔离环境里合法调用 handle(),
 # 不能因为生产常驻拿着锁就没法测。换的是**锁在哪**,不是"要不要锁",守卫本身没被削弱。
@@ -138,21 +136,58 @@ def _require_owner():
             "常驻在跑的话,一次性任务应该走 --for-domain 的等待模式,不要自己处理。")
 
 
-# ---------- 配置 ----------
+# ---------- 配置:agently-cli(公开 CLI + 免费 AgentMail 账号)----------
 
-def cfg():
-    c = {}
+AGENTLY = os.environ.get("AGENTLY_CLI", "agently-cli")
+AGENTLY_SETUP_GUIDE = (
+    "收信通道未就绪。准备步骤:\n"
+    "  1. 注册免费 AgentMail 账号( agent.qq.com )\n"
+    "  2. npm install -g @tencent-qqmail/agently-cli\n"
+    "  3. agently-cli auth login   # 交互式 OAuth,浏览器里授权一次"
+)
+
+
+class CliAuthError(RuntimeError):
+    """exit 3:授权失效,需要用户重新 auth login。"""
+
+
+class CliRateLimited(RuntimeError):
+    """exit 7:限频,按 Retry-After 退避后可重试。"""
+
+
+def _run_cli(args, timeout=60):
+    """跑 agently-cli,解析 JSON envelope。退出码语义见 SKILL.md:
+    0 成功 / 3 授权失效 / 7 限频 / 1·4 可重试 / 2·6 参数或业务错误。"""
+    p = subprocess.run([AGENTLY] + args, capture_output=True, text=True, timeout=timeout)
+    raw = p.stdout or ""
+    i = raw.find("{")
+    j = {}
+    if i >= 0:
+        try:
+            j = json.loads(raw[i:])
+        except Exception:
+            j = {}
+    if p.returncode == 0 and j.get("ok"):
+        return j.get("data") or {}
+    msg = ((j.get("error") or {}).get("message") or p.stderr or "").strip()[:200]
+    if p.returncode == 3:
+        raise CliAuthError(f"agently-cli 授权失效:{msg}\n{AGENTLY_SETUP_GUIDE}")
+    if p.returncode == 7:
+        raise CliRateLimited(f"agently-cli 限频:{msg}")
+    raise RuntimeError(f"agently-cli {' '.join(args[:2])} 失败(exit {p.returncode}):{msg}")
+
+
+def agently_ready():
+    """CLI 在 PATH 且已授权。未就绪返回 (False, 指引文案)。"""
+    if not shutil.which(AGENTLY):
+        return False, f"找不到 agently-cli。\n{AGENTLY_SETUP_GUIDE}"
     try:
-        c = json.load(open(STATE_JSON))
-    except Exception:
-        pass
-    return {
-        "imap_host": os.environ.get("IMAP_HOST") or c.get("imap_host", ""),
-        "imap_port": int(os.environ.get("IMAP_PORT") or c.get("imap_port") or 993),
-        "imap_user": os.environ.get("IMAP_USER") or c.get("imap_user", ""),
-        "imap_pass": os.environ.get("IMAP_PASS") or c.get("imap_pass", ""),
-        "imap_mailbox": os.environ.get("IMAP_MAILBOX") or c.get("imap_mailbox", "INBOX"),
-    }
+        d = _run_cli(["auth", "status"], timeout=30)
+    except Exception as e:
+        return False, f"agently-cli auth status 异常:{e}\n{AGENTLY_SETUP_GUIDE}"
+    if not d.get("logged_in"):
+        return False, f"agently-cli 未授权。\n{AGENTLY_SETUP_GUIDE}"
+    return True, ""
 
 
 # ---------- LLM(OpenAI 兼容端点,env 配置)----------
@@ -197,95 +232,78 @@ def llm_judge(frm, subj, body_txt):
     return None
 
 
-# ---------- IMAP 信箱 ----------
-# 生产是双信箱合流(QQ + AgentMail);开源版单 IMAP 信箱(Gmail 应用专用密码 /
-# QQ 授权码 / 任何 IMAP 都行)。多信箱需求:跑多个实例,各自 SWEEPER_LOCK 隔离。
+# ---------- AgentMail 信箱(agently-cli)----------
+# 生产是双信箱合流(QQ + AgentMail),都走 CLI 子进程;开源版单信箱,
+# 同一个 CLI 免费账号即可。幂等键 = message_id(msg_xxx)。
 
-_uid_map = {}       # mid → (uid, mailbox) 本轮列表缓存,read_msg 按它取全文
-
-
-def _imap_connect(c):
-    im = imaplib.IMAP4_SSL(c["imap_host"], c["imap_port"])
-    im.login(c["imap_user"], c["imap_pass"])
-    im.select(c["imap_mailbox"])
-    return im
+_own_addr = [None]  # 自己的信箱地址(惰性经 +me 取一次),用于跳过自己发出的信
 
 
-def _hdr(msg, name):
-    raw = msg.get(name, "") or ""
+def _self_addr():
+    if _own_addr[0] is None:
+        try:
+            d = _run_cli(["+me"], timeout=30)
+            _own_addr[0] = ((d.get("user") or {}).get("email")
+                            or d.get("email") or "").lower() or ""
+        except Exception:
+            _own_addr[0] = ""       # 取不到就不做自发信过滤,不挡主流程
+    return _own_addr[0]
+
+
+def list_msgs(limit=100, max_pages=5):
+    """列出最近 limit 封信的信封(mid/from/subject/snippet/date)。
+
+    【翻页必须做】只取第一页时,信箱一旦积压超过页大小,更早的未处理信就
+    滑出列表且不在幂等表里,永远不会被处理 —— 表现就是"某站的验证信凭空消失"。
+    用 pagination.next_cursor 翻到 max_pages 或取满 limit。
+    ⚠️ 不加 --is-unread:实测 +read 会把信标成已读,handle 读信后若处置未完成
+    (release 待重试),按未读列会让它从列表消失、永远漏重试。幂等靠 mail_seen。
+    """
+    out, cursor, pages = [], None, 0
     try:
-        parts = decode_header(raw)
-        return "".join(p.decode(ch or "utf-8", "replace") if isinstance(p, bytes) else p
-                       for p, ch in parts)
-    except Exception:
-        return str(raw)
-
-
-def list_msgs(limit=100, max_pages=1):
-    """列出最近 limit 封信的信封(mid/from/subject/date)。max_pages 参数仅为
-    与生产签名兼容保留(IMAP 一次取回,无分页语义)。"""
-    c = cfg()
-    out = []
-    try:
-        with imaplib.IMAP4_SSL(c["imap_host"], c["imap_port"]) as im:
-            im.login(c["imap_user"], c["imap_pass"])
-            im.select(c["imap_mailbox"])
-            _, data = im.search(None, "ALL")
-            uids = (data[0] or []).split()[-limit:]
-            for uid in uids:
-                _, md = im.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID TO)])")
-                if not md or not md[0]:
-                    continue
-                msg = message_from_bytes(md[0][1])
-                mid = msg.get("Message-ID", "") or f"uid-{uid.decode()}"
-                mid = "imap:" + mid.strip()
-                _uid_map[mid] = uid
-                frm = _hdr(msg, "From")
+        while pages < max(1, max_pages) and len(out) < limit:
+            args = ["message", "+list", "--dir", "inbox",
+                    "--limit", str(min(50, limit - len(out)))]
+            if cursor:
+                args += ["--cursor", cursor]
+            d = _run_cli(args, timeout=60)
+            for m in (d.get("data") or []):
+                frm = m.get("from") or {}
+                frm_email = frm.get("email", "") if isinstance(frm, dict) else str(frm)
                 # 自己发出的信不是来信,跳过(防把自己的回信误判成"真人跟进信")
-                if c["imap_user"] and c["imap_user"].lower() in frm.lower():
+                if frm_email and _self_addr() and _self_addr() in frm_email.lower():
                     continue
-                out.append({"mid": mid, "from": frm,
-                            "subject": _hdr(msg, "Subject"),
-                            "snippet": "",
-                            "date": msg.get("Date", "") or ""})
+                out.append({"mid": m.get("message_id") or "",
+                            "from": frm_email,
+                            "subject": m.get("subject") or "",
+                            "snippet": m.get("snippet") or "",
+                            "date": m.get("created_at") or ""})
+            pages += 1
+            cursor = (d.get("pagination") or {}).get("next_cursor")
+            if not cursor or not (d.get("pagination") or {}).get("has_more"):
+                break
+        else:
+            if cursor:      # 还有下一页却因页数上限停了 —— 必须说出来,别静默截断
+                log(f"⚠️ 信箱翻到第 {pages} 页仍有下一页,本轮截断;积压过多时提高 max_pages")
+    except (CliAuthError, CliRateLimited):
+        raise             # 授权/限频交给上层(预检/退避),不当普通空列表吞掉
     except Exception as e:
-        log(f"IMAP 信箱读取失败:{type(e).__name__}: {str(e)[:100]}")
-    if not out:
-        # 一封都读不到要**吵**:读到零几乎一定是通道坏了,而通道坏了的表现恰恰是"什么都没发生"
-        log("⚠️ IMAP 信箱本轮读到 0 封 —— 若信箱不该是空的,检查 imap 配置/授权码")
+        log(f"信箱读取失败:{type(e).__name__}: {str(e)[:100]}")
     return out
 
 
 def read_msg(mid):
-    """返回 (正文文本, 收件人地址列表)。只读不处置(PEEK,不置 \\Seen)。"""
-    c = cfg()
-    raw_mid = mid[5:] if mid.startswith("imap:") else mid
-    uid = _uid_map.get(mid)
-    with imaplib.IMAP4_SSL(c["imap_host"], c["imap_port"]) as im:
-        im.login(c["imap_user"], c["imap_pass"])
-        im.select(c["imap_mailbox"])
-        if uid is None:
-            # 缓存里没有(跨轮/跨进程):按 Message-ID 搜回来
-            _, data = im.search(None, "HEADER", "Message-ID", f'"{raw_mid}"')
-            ids = (data[0] or []).split()
-            if not ids:
-                return "", []
-            uid = ids[-1]
-        _, md = im.fetch(uid, "(BODY.PEEK[])")
-        if not md or not md[0]:
-            return "", []
-        msg = message_from_bytes(md[0][1])
-    texts, tos = [], []
-    for t in (msg.get_all("To") or []):
-        tos += re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", t)
-    for part in msg.walk():
-        if part.get_content_type() in ("text/plain", "text/html"):
-            try:
-                texts.append(part.get_payload(decode=True)
-                             .decode(part.get_content_charset() or "utf-8", "replace"))
-            except Exception:
-                pass
-    return "\n".join(texts)[:20000] or (_hdr(msg, "Subject")), tos
+    """返回 (正文文本, 收件人地址列表)。只读不处置(不改任何状态)。
+    ⚠️ 实测 +read 会把该信标为已读 —— 所以列表不按未读过滤(见 list_msgs)。"""
+    d = _run_cli(["message", "+read", "--id", mid], timeout=60)
+    m = d.get("data") if isinstance(d.get("data"), dict) else d
+    text = " ".join([m.get("subject") or "", m.get("body") or ""])
+    tos = []
+    for t in (m.get("to") or []):
+        e = t.get("email", "") if isinstance(t, dict) else str(t)
+        if e:
+            tos.append(e)
+    return text[:20000], tos
 
 
 # ---------- 安全闸 ----------
@@ -831,11 +849,11 @@ def sweep_once():
 
 def preflight():
     """依赖必须在启动时就查明白,不能等到点链接时才静默失败。"""
-    c = cfg()
-    missing = [k for k in ("imap_host", "imap_user", "imap_pass") if not c.get(k)]
-    if missing:
-        log(f"⚠️ 缺 IMAP 配置 {missing} —— 在 my_site.json 填 imap_host/imap_user/imap_pass"
-            f"(Gmail 用应用专用密码,QQ 用授权码),或用 IMAP_HOST/USER/PASS 环境变量")
+    missing = []
+    ok, why = agently_ready()
+    if not ok:
+        log(f"⚠️ {why}")
+        missing.append("agently-cli")
     if not (os.environ.get("LLM_KEY") or "").strip():
         log("⚠️ 缺 LLM_KEY —— 邮件意图分类不可用(LLM_ENDPOINT/LLM_KEY/LLM_MODEL)")
         missing.append("LLM_KEY")
@@ -888,7 +906,7 @@ if __name__ == "__main__":
         raise TimeoutError("sweep_once 超 300s 硬顶")
     signal.signal(signal.SIGALRM, _sweep_alarm)
     while True:
-        # alarm 给单轮 300s 硬顶,到点弃轮进下一轮(IMAP/LLM 调用挂死不打死常驻)
+        # alarm 给单轮 300s 硬顶,到点弃轮进下一轮(CLI/LLM 调用挂死不打死常驻)
         signal.alarm(300)
         try:
             n = sweep_once()

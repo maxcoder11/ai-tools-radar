@@ -20,13 +20,14 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 1. **OpenAI 兼容 LLM 端点**（必填）：环境变量 `LLM_ENDPOINT` / `LLM_KEY` /
    `LLM_MODEL`（可选降级链 `LLM_FALLBACKS`，逗号分隔）。提交代理每一步都靠它决策，
    邮件理解也靠它判意图；
-2. **一个 IMAP 信箱**（收验证/审核邮件）：Gmail 应用专用密码、QQ 授权码、任何
-   IMAP 都行。填 `my_site.json` 的 `imap_host/imap_user/imap_pass`（或 env
-   `IMAP_HOST/USER/PASS`）。`mail_sweeper.py` 自动收信、LLM 判意图、点验证链接
+2. **一个 AgentMail 信箱 + agently-cli**（收验证/审核邮件）：注册免费 AgentMail
+   账号（agent.qq.com）→ `npm install -g @tencent-qqmail/agently-cli` →
+   `agently-cli auth login` 浏览器里授权一次（`auth status` 可查状态）。
+   `mail_sweeper.py` 经 CLI 自动收信、LLM 判意图、点验证链接
    —— 四条安全闸别动（只处理投过的域 / 链接注册域=发件域且路径含验证词 /
    跳转逐跳不出域 / message-id 幂等）；
 3. **产品资料包**：`cp kit.example.json kit.json`，把产品名/URL/文案槽位/
-   forbidden_claims 全部换成你的真实资料；`submitter.email` 必须落进上面的 IMAP
+   forbidden_claims 全部换成你的真实资料；`submitter.email` 必须落进上面的 AgentMail
    信箱（验证码发到这）；
 4. **persona 身份**：`cp identities.example.json identities.json`，换成你的投放
    身份（姓名 + gmail 等中性域邮箱）。agent 按域 hash 固定抽取（同域稳定、跨域
@@ -46,7 +47,7 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 ```bash
 cd outreach
 npm install                                  # playwright-core
-cp my_site.example.json my_site.json         # 填 IMAP + capsolver(可选)
+cp my_site.example.json my_site.json         # 填 capsolver(可选);信箱走 agently-cli
 cp kit.example.json kit.json                 # 填你的产品资料(红线文案在此)
 cp identities.example.json identities.json   # 填你的 persona 池
 export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
@@ -93,7 +94,7 @@ state.jsonl 和 human_tasks.jsonl 就知道战果和待办。
 | `capsolver.mjs` | node-tools/capsolver.js | 打码客户端（key 走 my_site.json） |
 | `creds.mjs` | node-tools/creds.js | 站点账号凭据（锁+原子写） |
 | `rootdomain.mjs` + `psl_data.json` | scripts/rootdomain.py 的 JS 版 | PSL 根域判定，数据公开 PSL |
-| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；IMAP 替代私有信箱 CLI |
+| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；agently-cli 收信(免费 AgentMail 账号) |
 | `read_otp.py` | scripts/read_otp.py | 给 agent 取验证码/验证链接 |
 | `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避 |
 | `esp_hosts.json` | scripts/esp_hosts.json | ESP 跳转域白名单（唯一来源） |

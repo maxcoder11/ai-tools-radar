@@ -35,7 +35,7 @@ cd <本目录> && python3 -m http.server 8899
 
 ```bash
 cd outreach && npm install   # playwright-core;另需本机 Chrome 或 npx playwright install chromium
-cp my_site.example.json my_site.json     # IMAP 信箱 + 可选 capsolver_key
+cp my_site.example.json my_site.json     # 可选 capsolver_key;信箱走 agently-cli,不在此配
 cp kit.example.json kit.json             # 产品资料包(填表槽位/forbidden_claims 红线)
 cp identities.example.json identities.json  # persona 池
 export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
@@ -43,12 +43,13 @@ python3 targets.py && python3 driver.py --limit 5
 ```
 
 **开工前确认用户已准备**（缺了别跑）：OpenAI 兼容 LLM 端点（LLM_* 环境变量）、
-能收验证邮件的 IMAP 信箱（自己的 Gmail/QQ 或 agentmail 账号，配进 my_site.json）、
+AgentMail 信箱（注册免费账号 agent.qq.com → `npm i -g @tencent-qqmail/agently-cli`
+→ `agently-cli auth login` 授权一次，`auth status` 可查）、
 persona 身份池（identities.json）、产品资料包（kit.json）。
 
 - kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投
 - 先 `driver.py --limit 5` 小批验证，没问题再放量；state.jsonl 是唯一状态源，别手改
-- 提交后验证邮件由 `mail_sweeper.py --loop` 自动处理（IMAP 收信+LLM 判意图+点验证链接，
+- 提交后验证邮件由 `mail_sweeper.py --loop` 自动处理（agently-cli 收信+LLM 判意图+点验证链接，
   四条安全闸别动）；先 `--dry-run` 演一遍再放--loop
 - 验证码站没配 capsolver_key 会标 manual 进 human_tasks.jsonl，人工处理，不要尝试自动过码
 - delivery_ambiguous = 提交可能已投达但终局未定，永不自动重投，只能人工裁决

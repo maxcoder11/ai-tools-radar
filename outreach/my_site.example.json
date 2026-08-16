@@ -10,11 +10,7 @@
     "author_email": "alex.chen.dev@gmail.com",
     "author_site": "https://example.com/"
   },
-  "_mailbox": "【必准备】收验证/审核邮件的 IMAP 信箱:Gmail 用应用专用密码,QQ 用授权码,任何 IMAP 信箱都行;也可用 env IMAP_HOST/IMAP_USER/IMAP_PASS。mail_sweeper.py 靠它自动收信点验证链接",
-  "imap_host": "imap.gmail.com",
-  "imap_port": 993,
-  "imap_user": "",
-  "imap_pass": "",
+  "_mailbox": "【必准备】收验证/审核邮件的信箱:注册免费 AgentMail 账号(agent.qq.com)+ npm i -g @tencent-qqmail/agently-cli + agently-cli auth login 授权一次。mail_sweeper.py 经 CLI 自动收信点验证链接,不在本文件配置",
   "_llm": "【必准备】OpenAI 兼容端点。agent_submit.mjs / mail_sweeper.py 走环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL(降级链 LLM_FALLBACKS);下面的字段是给本仓其它工具用的",
   "llm_endpoint": "",
   "llm_key": "",
