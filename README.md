@@ -28,17 +28,24 @@ python3 -m http.server 8899
 
 ## 看完数据想动手 · Outreach tool
 
-`outreach/` 是一个半自动外链投放器：把外链库里"给竞品发过 dofollow"的实证页变成你的投放清单。
+`outreach/` 是一套**生产验证过的外链投放管道**（LLM-in-the-loop 浏览器代理）：查竞品的 dofollow 来源 → 生成投放清单 → 浏览器代理自动提交 → 自动收验证邮件点链接 → 终核链接真上线。
 
 ```bash
 cd outreach
-pip install playwright && playwright install chromium   # 或用本机已有浏览器:CHROME_BIN=/path/to/chrome
-cp my_site.example.json my_site.json                    # 填你的站点信息
-python3 targets.py                                      # 生成投放清单
-python3 submit.py --limit 20                            # 小批先试,--show 有头观察
+npm install                                                # playwright-core 等
+cp my_site.example.json my_site.json                       # 填站点资料 + AgentMail 收信配置
+cp kit.example.json kit.json                               # 产品资料包(文案槽位/forbidden_claims)
+cp identities.example.json identities.json                 # 投放 persona
+export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...          # OpenAI 兼容端点(必填,代理决策和邮件理解都靠它)
+python3 targets.py                                         # 生成投放清单
+python3 driver.py --limit 5                                # 小批试跑(先 5 个看状态)
+python3 mail_sweeper.py --loop                             # 常驻:收验证邮件/点验证链接
+node verify_link.mjs --pending --kit kit.json              # 终核:链接真上线才记 success
 ```
 
-特点：验证码进人工队列不硬刚、每域每天最多一次、状态断点续投、可选接入你自己的 LLM 端点生成上下文相关简介。详见 `outreach/README.md`。
+开工准备（缺了别跑）：免费 AgentMail 账号（agent.qq.com，收验证邮件）+ `npm i -g @tencent-qqmail/agently-cli` 授权一次；OpenAI 兼容 LLM 端点；persona 身份。详见 `outreach/README.md`。
+
+三条红线由代码硬执行，LLM 无权越过：付费站即停 / 文案过 forbidden_claims 闸门 / 验证码不让 LLM 编答案（无 capsolver key 进人工队列）。单次核验不判死——终核连续 3 次 offline 才算掉链。
 
 ## 数据说明 · Data notes
 
