@@ -5,3 +5,14 @@ node_modules/
 outreach/my_site.json
 outreach/state.jsonl
 outreach/worklist.jsonl
+outreach/kit.json
+outreach/creds.json
+outreach/identities.json
+outreach/run/
+outreach/events.jsonl
+outreach/costs.jsonl
+outreach/constraints.jsonl
+outreach/human_tasks.jsonl
+outreach/mail_seen.jsonl
+outreach/recipes.json
+outreach/.creds.lock*

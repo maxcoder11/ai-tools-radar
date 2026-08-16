@@ -1,0 +1,11 @@
+[
+  {
+    "_说明": "persona 池模板(数组,只留对象)。cp identities.example.json identities.json 后换成你的真实投放身份:姓名 + gmail 等中性域邮箱;可选 url 字段覆盖评论作者网址。agent 按域 hash 固定抽取(同域稳定、跨域轮换),破跨站签名。千万别用占位符真投",
+    "name": "Example Person One",
+    "email": "person1@example.com"
+  },
+  {
+    "name": "Example Person Two",
+    "email": "person2@example.com"
+  }
+]

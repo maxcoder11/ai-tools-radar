@@ -1,49 +1,119 @@
-# outreach/ — 半自动外链投放器
+# outreach/ — LLM-in-the-loop 外链投放管道
 
-看完数据想动手？这个工具把"竞品的 dofollow 来源"变成你的投放清单。
+看完数据想动手？这个目录把"竞品的 dofollow 来源"变成你的投放清单，并用一个
+**LLM 决策的浏览器代理**完成目录站提交：观察页面 → LLM 决策 → 执行 → 再观察，
+像人一样处理每个站的表单变体。移植自一套生产验证过的私有管道，三条红线由代码
+硬执行，LLM 无权越过：
+
+1. **付费**：LLM 选择付费/结账类动作 → 直接 `skipped_paid` 终止；
+2. **文案**：所有填入值必须过 `kit.json` 的 `forbidden_claims` 正则闸门，
+   LLM 只能选预设槽位或基于 kit 事实组合；
+3. **验证码**：LLM 只声明验证码类型，解题由代码走 CapSolver，不让 LLM 编答案；
+   没配 `capsolver_key` → 该域标记 `manual` 进人工队列，不硬刚。
+
+另有：投递认领（submit 类动作单发派发，防重复提交）、`delivery_ambiguous` 终态
+（永不自动重投，人工裁决）、状态迁移守卫（投达态不许被辅助步骤异常打回
+blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 
 ## 开工前必须准备（缺了别跑）
 
-1. **一个能收信的邮箱 + 它的 IMAP 配置**：目录站提交后发验证/审核邮件，`mailbot.py` 自动收、自动点验证链接（安全闸：只处理投过的域、链接不出域、幂等）。自己的 Gmail（应用专用密码）/QQ 邮箱（授权码）即可，或注册 agentmail(agently) 账号专门收
-2. **一套 persona 身份**：投放用的名字/邮箱/个人网址（`my_site.json` 的 `persona` 段）。别用主身份裸奔；量大的话准备 2-3 套轮换（同域同 persona，防标记）
-3. **你的站点资料**：名称、URL、一句话卖点、两三句简介（填 `my_site.json`）
-4. 浏览器：`playwright install chromium`，或设 `CHROME_BIN` 指向本机已有 Chrome/Chromium
+1. **OpenAI 兼容 LLM 端点**（必填）：环境变量 `LLM_ENDPOINT` / `LLM_KEY` /
+   `LLM_MODEL`（可选降级链 `LLM_FALLBACKS`，逗号分隔）。提交代理每一步都靠它决策，
+   邮件理解也靠它判意图；
+2. **一个 IMAP 信箱**（收验证/审核邮件）：Gmail 应用专用密码、QQ 授权码、任何
+   IMAP 都行。填 `my_site.json` 的 `imap_host/imap_user/imap_pass`（或 env
+   `IMAP_HOST/USER/PASS`）。`mail_sweeper.py` 自动收信、LLM 判意图、点验证链接
+   —— 四条安全闸别动（只处理投过的域 / 链接注册域=发件域且路径含验证词 /
+   跳转逐跳不出域 / message-id 幂等）；
+3. **产品资料包**：`cp kit.example.json kit.json`，把产品名/URL/文案槽位/
+   forbidden_claims 全部换成你的真实资料；`submitter.email` 必须落进上面的 IMAP
+   信箱（验证码发到这）；
+4. **persona 身份**：`cp identities.example.json identities.json`，换成你的投放
+   身份（姓名 + gmail 等中性域邮箱）。agent 按域 hash 固定抽取（同域稳定、跨域
+   轮换），裸跑会被 Akismet 跨站签名烧域；
+5. **浏览器**：`npm install` + 本机有 Chrome，或 `CHROME_BIN` 指一个
+   Chrome/Chromium，或 `npx playwright install chromium`。
 
 可选增强：
 
-- `llm_endpoint/key/model`：你自己的 OpenAI 兼容端点——按目标页内容生成简介/评论，转化率显著提升
-- `capsolver_key`：验证码服务——有了才尝试过验证码的站（默认跳过进人工队列）
+- `capsolver_key`（+ `twocaptcha_key` 降级通道）：有了才自动过验证码的站；
+  各供应商日预算熔断 $50（`CAPSOLVER_DAILY_BUDGET_USD` 等可调）；
+- `HTTPS_PROXY`：出站代理。⚠️ 用 Cloudflare 整页挑战解题时必须配——
+  `cf_clearance` 绑定 IP+UA，浏览器和解题必须同一出口。
 
 ## 用法
 
 ```bash
-pip install playwright && playwright install chromium
-cp my_site.example.json my_site.json   # 填好上面的准备项
-python3 targets.py                     # 生成 worklist.jsonl(tier1 提交页优先)
-python3 submit.py --limit 5 --show     # 先 5 个有头模式亲眼验证
-python3 submit.py --limit 50           # 没问题再放量
-python3 mailbot.py --loop              # 常驻:自动收验证邮件、点验证链接
+cd outreach
+npm install                                  # playwright-core
+cp my_site.example.json my_site.json         # 填 IMAP + capsolver(可选)
+cp kit.example.json kit.json                 # 填你的产品资料(红线文案在此)
+cp identities.example.json identities.json   # 填你的 persona 池
+export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
+
+python3 targets.py                           # 生成 worklist.jsonl(tier1 提交页优先)
+node agent_submit.mjs https://某站/submit --steps 2   # 单站干跑验证装载
+python3 driver.py --limit 5                  # 先 5 个亲眼验证
+python3 driver.py --limit 50                 # 没问题再放量
+python3 mail_sweeper.py --dry-run            # 先演一遍判定质量
+python3 mail_sweeper.py --loop               # 常驻:自动收信点验证链接
 ```
 
-**完整闭环**：submit.py 投放 → 站点发验证邮件 → mailbot.py 自动收信点链接 → state.jsonl 记 `email_verified`。
-收录通过/拒绝的邮件也会按规则分类记录（approved/rejected），每天看一眼 state.jsonl 就知道战果。
+**完整闭环**：driver.py 投放 → 站点发验证邮件 → mail_sweeper.py 收信点链接 →
+state.jsonl 记 `email_verified`，卡死的 blocked 站自动回池重投；收录通过/拒绝的
+来信按 LLM 意图分类写回（pending_review/failed/skipped_badge）。每天看一眼
+state.jsonl 和 human_tasks.jsonl 就知道战果和待办。
 
-## 工作原理
+## 状态口径（与生产一致）
 
-1. **targets.py**：从 `data/library.json` 筛"给竞品发过 dofollow"的实证页——平台分类为 blog/cms/wiki/forum 的才收；同域去重；分两层（tier1=带 submit/add/directory 等提交入口的页，tier2=高权重机会页）
-2. **submit.py**：playwright 开页面 → 规则识别表单（评论/提交两类）→ 按 `my_site.json` 填充 → 提交 → 记录结果到 `state.jsonl`
-3. 状态：done / done_unverified / manual(验证码) / failed。重跑自动续，done/manual 不重投
+- `success` / `pending_review`：页面有严格回执文案（否定句/条件句先过滤）；
+  success 还要过"实站可检索"自验证，检索不到降 pending_review；
+- `emailed`：仅限站内联系表单提交成功且回执可见（代理无发信能力）；
+- `blocked` / `failed`：未投达（每天最多重试一次）；
+- `delivery_ambiguous`：submit 已派发但终局未定 —— **永不自动重投**，人工裁决；
+- `manual`：有验证码但没配打码 key，已进人工队列；
+- `skipped_paid` / `skipped_badge` / `skipped_fit`：按政策跳过；
+- `email_verified`：验证信点通，blocked 解除回池。
+
+账本文件（全部 gitignore）：`state.jsonl`（当前态投影）/ `events.jsonl`（事件）/
+`costs.jsonl`（LLM+打码花费）/ `constraints.jsonl`（站点约束带 TTL）/
+`human_tasks.jsonl`（人工队列）/ `recipes.json`（打法沉淀）/ `creds.json`
+（站点注册账号，排他锁+原子写）。
+
+## 文件对应（移植自生产管道）
+
+| 文件 | 生产对应 | 说明 |
+|---|---|---|
+| `agent_submit.mjs` | node-tools/agent_submit.js | 观察-决策-执行主循环 + 三条红线 |
+| `state.mjs` / `state.py` | node-tools/dbw.js / scripts/dbwpy.py | SQLite → JSONL 账本，守卫语义逐条对齐 |
+| `submission_safety.mjs` | node-tools/submission_safety.js | 提交类控件判定 + 回执分类 |
+| `agent_submit_runtime.mjs` | node-tools/agent_submit_runtime.js | 动作结果结构化 + 看门狗预算 |
+| `wall_detect.mjs` | node-tools/wall_detect.js | 墙识别/约束归因/reCAPTCHA 探测 |
+| `outbound_guard.mjs` | node-tools/outbound_guard.js | 出站 SSRF 闸 |
+| `capsolver.mjs` | node-tools/capsolver.js | 打码客户端（key 走 my_site.json） |
+| `creds.mjs` | node-tools/creds.js | 站点账号凭据（锁+原子写） |
+| `rootdomain.mjs` + `psl_data.json` | scripts/rootdomain.py 的 JS 版 | PSL 根域判定，数据公开 PSL |
+| `mail_sweeper.py` | scripts/mail_sweeper.py | 邮件理解；IMAP 替代私有信箱 CLI |
+| `read_otp.py` | scripts/read_otp.py | 给 agent 取验证码/验证链接 |
+| `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避 |
+| `esp_hosts.json` | scripts/esp_hosts.json | ESP 跳转域白名单（唯一来源） |
 
 ## 纪律（踩过的坑沉淀）
 
-- 验证码不硬碰：检测到 recaptcha/hcaptcha/turnstile 直接进人工队列
-- 每域每天最多一次，域间 20-40 秒随机间隔
-- 只投实证页：清单全部来自"给竞品发过 dofollow"的页面
+- 验证码不硬碰：没配 capsolver_key 的验证码站 → manual 人工队列；
+- 每域每天最多一次，域间 20-40 秒随机间隔；
+- 只投实证页：清单全部来自"给竞品发过 dofollow"的页面（targets.py）；
+- `delivery_ambiguous` 和 manual 队列在 `human_tasks.jsonl`，人工接活；
 - 提交后 1-4 周盯邮箱：收录审核大多要人工等，验证邮件不点 = 白投
+  （`mail_sweeper.py --loop` 常驻自动点）；
+- 别手改 state.jsonl；它是唯一状态源，重跑自动续。
 
 ## 老实交代
 
-- 表单识别是启发式的，结构怪异的站会失败（记 failed，3 次后放弃）
-- `done_unverified` = 提交了但未见成功关键词——抽查几个校准
-- tier2 机会页很多没有可用表单（新闻稿等），失败率高是预期行为，不是 bug
-- 收录率本质低：我们私有库实测 ~1% 终核上线，这个工具的价值是把"找到哪里能投"的成本降到零，转化靠持续投
+- LLM 决策质量取决于你给的端点；弱模型会在表单上烧步数（每站 24 步上限）；
+- `pending_review` ≠ 上线：目录站审核 1-4 周，收录率本质低（我们私有库实测
+  ~1% 终核上线），这个工具的价值是把"找到哪里能投+投出去"的成本降到零，
+  转化靠持续投；
+- 反检测件（抹 webdriver/逐字打字/流量治理）能降低被拦率，但不是隐身衣；
+  Cloudflare 整页挑战要 capsolver + 代理同出口才有机会；
+- 跑之前想清楚：批量提交目录站在某些站的 ToS 里是灰色地带，后果自负。

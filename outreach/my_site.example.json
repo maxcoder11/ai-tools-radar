@@ -10,11 +10,16 @@
     "author_email": "alex.chen.dev@gmail.com",
     "author_site": "https://example.com/"
   },
-  "_mailbox": "【必准备】一个你能收信的邮箱(收目录站的验证/审核邮件):自己的 Gmail/QQ 邮箱,或 agentmail(agently)账号。验证邮件需要人工点链接——工具不代收",
-  "_llm": "可选:OpenAI 兼容端点+key+model,用于按目标页内容生成简介/评论(显著提升转化)",
+  "_mailbox": "【必准备】收验证/审核邮件的 IMAP 信箱:Gmail 用应用专用密码,QQ 用授权码,任何 IMAP 信箱都行;也可用 env IMAP_HOST/IMAP_USER/IMAP_PASS。mail_sweeper.py 靠它自动收信点验证链接",
+  "imap_host": "imap.gmail.com",
+  "imap_port": 993,
+  "imap_user": "",
+  "imap_pass": "",
+  "_llm": "【必准备】OpenAI 兼容端点。agent_submit.mjs / mail_sweeper.py 走环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL(降级链 LLM_FALLBACKS);下面的字段是给本仓其它工具用的",
   "llm_endpoint": "",
   "llm_key": "",
   "llm_model": "",
-  "_captcha": "可选:2Captcha/capsolver key。有了才尝试过验证码的站;没有就进人工队列",
-  "capsolver_key": ""
+  "_captcha": "可选:capsolver key(降级通道 2Captcha 另配 twocaptcha_key)。没配 → 验证码站标 manual 进人工队列,不硬刚",
+  "capsolver_key": "",
+  "twocaptcha_key": ""
 }

@@ -1,0 +1,9 @@
+{
+  "name": "ai-tools-radar-outreach",
+  "version": "1.0.0",
+  "private": true,
+  "description": "外链投放工具(LLM-in-the-loop 目录提交代理)的 node 依赖",
+  "dependencies": {
+    "playwright-core": "^1.61.1"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "_comment": "ESP 跳转域白名单【唯一来源,2026-08-10 收拢】。读取方:scripts/mail_sweeper.py(2026-08-11 起真源在本仓,常驻验证链安全闸)和 node-tools/agent_submit.js(gatedOpen 浏览器带闸打开,经 wall_detect.js)。改名单只改这份文件,禁止在任何 .py/.js 里复制本表——两处闸必须永远是同一份名单,分叉意味着一边放行一边拦,或更糟:两边各自漏修。读取方读不到本文件时按空名单 fail-closed(宁可拦下真 ESP 链接,不可放错)。",
+  "_note_supabase": "supabase.co 只放行 /auth/ 路径的额外限制在 mail_sweeper.link_ok 里判,这里先让 host 过闸(08-07 hubly-tools.com 实证)。",
+  "hosts": [
+    "sendgrid.net",
+    "sendgrid.com",
+    "mailgun.org",
+    "mailgun.net",
+    "pstmrk.it",
+    "postmarkapp.com",
+    "awstrack.me",
+    "list-manage.com",
+    "mandrillapp.com",
+    "resend.com",
+    "resend.dev",
+    "customeriomail.com",
+    "sparkpostmail.com",
+    "customerio.com",
+    "mailjet.com",
+    "mlsend.com",
+    "loops.so",
+    "email.loops.so",
+    "hubspotemail.net",
+    "hs-sites.com",
+    "brevo.com",
+    "sendinblue.com",
+    "klclick.com",
+    "klclick1.com",
+    "supabase.co"
+  ]
+}

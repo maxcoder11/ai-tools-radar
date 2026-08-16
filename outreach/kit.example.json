@@ -1,0 +1,58 @@
+{
+  "_说明": "产品资料包模板。cp kit.example.json kit.json,把内容全部换成你自己产品的真实资料。agent_submit.mjs 的填表槽位、红线校验(forbidden_claims)、LLM 决策上下文全部从这里读。素材图(可选)放 kit.json 同目录 assets/:logo-256.png / og-1200x630.png / hero-1480x900.png。",
+  "product": {
+    "name": "Your Product Name",
+    "url": "https://your-product.com/",
+    "og_image": "https://your-product.com/og.png",
+    "submitter": {
+      "_说明": "受控身份:站方注册账号用的名字和邮箱。email 必须是你能收信的地址(与 my_site.json 的 IMAP 信箱同一个),验证码/验证信会发到这",
+      "name": "Your Name",
+      "email": "you@yourmail.com"
+    },
+    "categories": ["Productivity", "SaaS"],
+    "tags": ["tag1", "tag2", "tag3"],
+    "positioning": {
+      "one_liner": "一句话说清你的产品是干什么的",
+      "differentiators": ["和竞品的真实差异 1", "真实差异 2"]
+    },
+    "facts_for_screening": "给 LLM 侦察/核验用的产品事实:阶段、规模、类目。如实写,LLM 靠它判断站点门槛是否满足",
+    "audience_note": "可选:受众适配指引,注入 LLM 决策上下文。例:评论区/社区页只要读者人群是 XX,就别以类目不匹配拒"
+  },
+  "copy": {
+    "_说明": "填表文案槽位。每个长度档给 2-3 条变体;字段 maxlength 装不下时代码自动换更短的变体。所有文案必须过 forbidden_claims 红线",
+    "taglines": [
+      "≤80 字符的一句话卖点,变体 1",
+      "变体 2"
+    ],
+    "descriptions": {
+      "xs_50": ["≤50 字符的超短描述"],
+      "s_150": ["≤150 字符的短描述,变体 1", "变体 2"],
+      "m_300": ["≤300 字符的中等描述"],
+      "l_510": ["≤510 字符的完整描述:干什么、给谁用、有什么不同"]
+    }
+  },
+  "compliance": {
+    "_说明": "红线:forbidden_claims_regex 命中的文案**代码硬拦截**,LLM 无权越过。写你产品不能声称的东西(未经证实的 AI 能力/best/guaranteed/官方认证等)",
+    "forbidden_claims_regex": [
+      "\\bbest\\b",
+      "\\b#?1\\b",
+      "guarantee",
+      "100%",
+      "official(ly)? (approved|certified|endorsed)",
+      "免费试用一切|永久免费"
+    ]
+  },
+  "comment_voice": {
+    "_说明": "可选,博客评论区的写作规范(整段删掉则评论场景无嗓音约束)。few_shots 只学语气,代码禁止照抄",
+    "tone": ["像真实用户", "具体", "不推销"],
+    "do": ["引用博文具体内容", "1-3 句", "第一人称"],
+    "dont": ["通用好评", "关键词堆砌", "正文放链接"],
+    "few_shots": [
+      {"scene": "示例场景", "text": "一条示范性评论(学语气不学原文)"}
+    ]
+  },
+  "stories": {
+    "_说明": "可选:可引用的事实弹药(真实用户场景/数据),评论自然化用",
+    "items": []
+  }
+}

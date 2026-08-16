@@ -31,22 +31,28 @@ cd <本目录> && python3 -m http.server 8899
 
 ## outreach/（外链投放工具）
 
-用户看完数据要投放时用这个：
+用户看完数据要投放时用这个（LLM-in-the-loop 管道，详见 outreach/README.md）：
 
 ```bash
-cd outreach && pip install playwright && playwright install chromium
-cp my_site.example.json my_site.json   # 必须先把示例站信息改成用户自己的
-python3 targets.py && python3 submit.py --limit 5 --show
+cd outreach && npm install   # playwright-core;另需本机 Chrome 或 npx playwright install chromium
+cp my_site.example.json my_site.json     # IMAP 信箱 + 可选 capsolver_key
+cp kit.example.json kit.json             # 产品资料包(填表槽位/forbidden_claims 红线)
+cp identities.example.json identities.json  # persona 池
+export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
+python3 targets.py && python3 driver.py --limit 5
 ```
 
-**开工前确认用户已准备**（缺了别跑）：能收验证邮件的邮箱（自己的或 agentmail/agently 账号）、
-persona 身份（author_name/email/site）、站点简介。验证邮件需要用户人工点链接，工具不代收。
+**开工前确认用户已准备**（缺了别跑）：OpenAI 兼容 LLM 端点（LLM_* 环境变量）、
+能收验证邮件的 IMAP 信箱（自己的 Gmail/QQ 或 agentmail 账号，配进 my_site.json）、
+persona 身份池（identities.json）、产品资料包（kit.json）。
 
-- `my_site.json` 里的 name/url/description/email/persona 必须替换成用户真实信息,别用示例值投
-- 先 `--limit 5 --show` 有头验证,没问题再放量;state.jsonl 是唯一状态源,别手改
-- 提交后验证邮件由 `mailbot.py` 自动处理(IMAP 收信+点验证链接,四条安全闸别动);用户只需提供 IMAP 配置
-- manual(验证码)队列就交给用户人工处理,不要尝试自动过码
-- 改表单识别逻辑在 submit.py 的 FIELD_MAP / JS_FILL;tier 分层在 targets.py
+- kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投
+- 先 `driver.py --limit 5` 小批验证，没问题再放量；state.jsonl 是唯一状态源，别手改
+- 提交后验证邮件由 `mail_sweeper.py --loop` 自动处理（IMAP 收信+LLM 判意图+点验证链接，
+  四条安全闸别动）；先 `--dry-run` 演一遍再放--loop
+- 验证码站没配 capsolver_key 会标 manual 进 human_tasks.jsonl，人工处理，不要尝试自动过码
+- delivery_ambiguous = 提交可能已投达但终局未定，永不自动重投，只能人工裁决
+- LLM 端点/打码 key/代理全走环境变量或 my_site.json；私仓的任何 key/产品资料不得进本目录
 
 ## 数据更新
 
