@@ -43,8 +43,8 @@ python3 targets.py && python3 driver.py --limit 5
 ```
 
 **开工前确认用户已准备**（缺了别跑）：OpenAI 兼容 LLM 端点（LLM_* 环境变量）、
-AgentMail 信箱（注册免费账号 agent.qq.com → `npm i -g @tencent-qqmail/agently-cli`
-→ `agently-cli auth login` 授权一次，`auth status` 可查）、
+AgentMail 信箱（二选一，都免费：agent.qq.com 走 agently-cli `auth login`；
+agentmail.to 拿 REST API key 填 my_site.json 的 agentmail_* 字段——此后端未实测）、
 persona 身份池（identities.json）、产品资料包（kit.json）。
 
 - kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投

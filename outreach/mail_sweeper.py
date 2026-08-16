@@ -2,8 +2,9 @@
 """mail_sweeper.py — 邮件理解与处置(常驻/单跑)。外链投放管道组成部分。
 
 2026-08-16 开源移植版(生产:backlinks-v2/scripts/mail_sweeper.py):
-  - 取信:agently-cli(subprocess 调公开 CLI,用户注册免费 AgentMail 账号
-    agent.qq.com + `agently-cli auth login` 授权一次即可)
+  - 取信:双后端二选一(my_site.json 的 mail_backend)——
+    "agently"(默认,agent.qq.com 免费账号 + agently-cli)或
+    "agentmail"(agentmail.to REST API key,urllib 直连零 SDK;UNVERIFIED 未实测)
   - LLM 意图分类:私有网关 → LLM_ENDPOINT/LLM_KEY/LLM_MODEL 环境变量
     (OpenAI 兼容端点,降级链 LLM_FALLBACKS 逗号分隔)
   - 账本:私仓 SQLite → state.py(state.jsonl + constraints/human_tasks/mail_seen)
@@ -232,9 +233,30 @@ def llm_judge(frm, subj, body_txt):
     return None
 
 
-# ---------- AgentMail 信箱(agently-cli)----------
-# 生产是双信箱合流(QQ + AgentMail),都走 CLI 子进程;开源版单信箱,
-# 同一个 CLI 免费账号即可。幂等键 = message_id(msg_xxx)。
+# ---------- 收信层:双后端(agently-cli / agentmail.to REST)----------
+# my_site.json 的 "mail_backend":"agently"(默认)|"agentmail" 二选一,都免费:
+#   agently   —— agent.qq.com 账号 + agently-cli auth login(子进程调 CLI)
+#   agentmail —— console.agentmail.to 注册拿 API key(am_ 开头)+ inbox_id,
+#                配 my_site.json 的 agentmail_api_key/agentmail_inbox_id
+#                (或 env AGENTMAIL_API_KEY/AGENTMAIL_INBOX_ID),urllib 直连 REST,零 SDK
+# 幂等键统一 = 各后端的 message_id。两个抽象 list_msgs()/read_msg(mid) 签名不变。
+#
+# UNVERIFIED:agentmail 后端按官方 API 文档编写,我们没有它的 key,未对真实服务跑过。
+
+def _mail_cfg():
+    c = {}
+    try:
+        c = json.load(open(os.path.join(HERE, "my_site.json")))
+    except Exception:
+        pass
+    return {
+        "backend": (os.environ.get("MAIL_BACKEND") or c.get("mail_backend") or "agently").strip(),
+        "agentmail_key": (os.environ.get("AGENTMAIL_API_KEY") or c.get("agentmail_api_key") or "").strip(),
+        "agentmail_inbox": (os.environ.get("AGENTMAIL_INBOX_ID") or c.get("agentmail_inbox_id") or "").strip(),
+    }
+
+
+# ==================== 后端 A:agently-cli ====================
 
 _own_addr = [None]  # 自己的信箱地址(惰性经 +me 取一次),用于跳过自己发出的信
 
@@ -250,51 +272,37 @@ def _self_addr():
     return _own_addr[0]
 
 
-def list_msgs(limit=100, max_pages=5):
-    """列出最近 limit 封信的信封(mid/from/subject/snippet/date)。
-
-    【翻页必须做】只取第一页时,信箱一旦积压超过页大小,更早的未处理信就
-    滑出列表且不在幂等表里,永远不会被处理 —— 表现就是"某站的验证信凭空消失"。
-    用 pagination.next_cursor 翻到 max_pages 或取满 limit。
-    ⚠️ 不加 --is-unread:实测 +read 会把信标成已读,handle 读信后若处置未完成
-    (release 待重试),按未读列会让它从列表消失、永远漏重试。幂等靠 mail_seen。
-    """
+def _list_msgs_agently(limit, max_pages):
     out, cursor, pages = [], None, 0
-    try:
-        while pages < max(1, max_pages) and len(out) < limit:
-            args = ["message", "+list", "--dir", "inbox",
-                    "--limit", str(min(50, limit - len(out)))]
-            if cursor:
-                args += ["--cursor", cursor]
-            d = _run_cli(args, timeout=60)
-            for m in (d.get("data") or []):
-                frm = m.get("from") or {}
-                frm_email = frm.get("email", "") if isinstance(frm, dict) else str(frm)
-                # 自己发出的信不是来信,跳过(防把自己的回信误判成"真人跟进信")
-                if frm_email and _self_addr() and _self_addr() in frm_email.lower():
-                    continue
-                out.append({"mid": m.get("message_id") or "",
-                            "from": frm_email,
-                            "subject": m.get("subject") or "",
-                            "snippet": m.get("snippet") or "",
-                            "date": m.get("created_at") or ""})
-            pages += 1
-            cursor = (d.get("pagination") or {}).get("next_cursor")
-            if not cursor or not (d.get("pagination") or {}).get("has_more"):
-                break
-        else:
-            if cursor:      # 还有下一页却因页数上限停了 —— 必须说出来,别静默截断
-                log(f"⚠️ 信箱翻到第 {pages} 页仍有下一页,本轮截断;积压过多时提高 max_pages")
-    except (CliAuthError, CliRateLimited):
-        raise             # 授权/限频交给上层(预检/退避),不当普通空列表吞掉
-    except Exception as e:
-        log(f"信箱读取失败:{type(e).__name__}: {str(e)[:100]}")
+    while pages < max(1, max_pages) and len(out) < limit:
+        args = ["message", "+list", "--dir", "inbox",
+                "--limit", str(min(50, limit - len(out)))]
+        if cursor:
+            args += ["--cursor", cursor]
+        d = _run_cli(args, timeout=60)
+        for m in (d.get("data") or []):
+            frm = m.get("from") or {}
+            frm_email = frm.get("email", "") if isinstance(frm, dict) else str(frm)
+            # 自己发出的信不是来信,跳过(防把自己的回信误判成"真人跟进信")
+            if frm_email and _self_addr() and _self_addr() in frm_email.lower():
+                continue
+            out.append({"mid": m.get("message_id") or "",
+                        "from": frm_email,
+                        "subject": m.get("subject") or "",
+                        "snippet": m.get("snippet") or "",
+                        "date": m.get("created_at") or ""})
+        pages += 1
+        cursor = (d.get("pagination") or {}).get("next_cursor")
+        if not cursor or not (d.get("pagination") or {}).get("has_more"):
+            break
+    else:
+        if cursor:      # 还有下一页却因页数上限停了 —— 必须说出来,别静默截断
+            log(f"⚠️ 信箱翻到第 {pages} 页仍有下一页,本轮截断;积压过多时提高 max_pages")
     return out
 
 
-def read_msg(mid):
-    """返回 (正文文本, 收件人地址列表)。只读不处置(不改任何状态)。
-    ⚠️ 实测 +read 会把该信标为已读 —— 所以列表不按未读过滤(见 list_msgs)。"""
+def _read_msg_agently(mid):
+    """⚠️ 实测 +read 会把该信标为已读 —— 所以列表不按未读过滤(见 list_msgs)。"""
     d = _run_cli(["message", "+read", "--id", mid], timeout=60)
     m = d.get("data") if isinstance(d.get("data"), dict) else d
     text = " ".join([m.get("subject") or "", m.get("body") or ""])
@@ -304,6 +312,116 @@ def read_msg(mid):
         if e:
             tos.append(e)
     return text[:20000], tos
+
+
+# ==================== 后端 B:agentmail.to(REST,零 SDK)====================
+# UNVERIFIED(2026-08-16):以下按官方文档编写(GET /v0/inboxes/{inbox}/messages,
+# Bearer key;429 带 Retry-After;4xx/5xx 看 body.message),未对真实服务实测。
+
+AGENTMAIL_API = "https://api.agentmail.to/v0"
+AGENTMAIL_SETUP_GUIDE = (
+    "agentmail.to 收信通道未就绪。准备步骤:\n"
+    "  1. console.agentmail.to 免费注册,拿 API key(am_ 开头)\n"
+    "     (或 npm i -g agentmail-cli && agentmail agent sign-up)\n"
+    "  2. my_site.json 填 agentmail_api_key + agentmail_inbox_id\n"
+    "     (或 env AGENTMAIL_API_KEY / AGENTMAIL_INBOX_ID)"
+)
+
+
+def _agentmail_get(path, timeout=30):
+    """UNVERIFIED。GET agentmail.to REST;429 读 Retry-After 抛限频,4xx/5xx 取 body.message。"""
+    c = _mail_cfg()
+    req = urllib.request.Request(AGENTMAIL_API + path, headers={
+        "Authorization": "Bearer " + c["agentmail_key"], "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        msg = ""
+        try:
+            msg = (json.loads(e.read()) or {}).get("message") or ""
+        except Exception:
+            pass
+        if e.code == 429:
+            raise CliRateLimited(f"agentmail 限频(Retry-After {e.headers.get('Retry-After', '?')}s):{msg}")
+        if e.code in (401, 403):
+            raise CliAuthError(f"agentmail key 无效(HTTP {e.code}):{msg}\n{AGENTMAIL_SETUP_GUIDE}")
+        raise RuntimeError(f"agentmail GET {path} 失败(HTTP {e.code}):{msg}")
+
+
+def _list_msgs_agentmail(limit, max_pages):
+    """UNVERIFIED。信封字段:message_id/from/subject/preview/created_at;
+    翻页 page_token → next_page_token。"""
+    c = _mail_cfg()
+    inbox = c["agentmail_inbox"]
+    out, token, pages = [], None, 0
+    while pages < max(1, max_pages) and len(out) < limit:
+        q = f"?limit={min(50, limit - len(out))}"
+        if token:
+            q += f"&page_token={token}"
+        d = _agentmail_get(f"/inboxes/{inbox}/messages{q}", timeout=60)
+        for m in (d.get("messages") or []):
+            frm = m.get("from") or ""
+            frm_email = frm.get("email", "") if isinstance(frm, dict) else str(frm)
+            # 自己发出的信不是来信,跳过(inbox_id 即本信箱地址)
+            if frm_email and inbox and inbox.lower() in frm_email.lower():
+                continue
+            out.append({"mid": m.get("message_id") or "",
+                        "from": frm_email,
+                        "subject": m.get("subject") or "",
+                        "snippet": m.get("preview") or "",
+                        "date": str(m.get("created_at") or "")})
+        pages += 1
+        token = d.get("next_page_token")
+        if not token:
+            break
+    else:
+        if token:      # 还有下一页却因页数上限停了 —— 必须说出来,别静默截断
+            log(f"⚠️ 信箱翻到第 {pages} 页仍有下一页,本轮截断;积压过多时提高 max_pages")
+    return out
+
+
+def _read_msg_agentmail(mid):
+    """UNVERIFIED。响应含 text/html/extracted_text 字段。"""
+    c = _mail_cfg()
+    m = _agentmail_get(f"/inboxes/{c['agentmail_inbox']}/messages/{mid}", timeout=60)
+    text = " ".join([m.get("subject") or "", m.get("extracted_text") or "",
+                     m.get("text") or "", m.get("html") or ""])
+    tos = []
+    for t in (m.get("to") or []):
+        e = t.get("email", "") if isinstance(t, dict) else str(t)
+        if e:
+            tos.append(e)
+    return text[:20000], tos
+
+
+# ==================== 分发(签名不变)====================
+
+def list_msgs(limit=100, max_pages=5):
+    """列出最近 limit 封信的信封(mid/from/subject/snippet/date)。
+
+    【翻页必须做】只取第一页时,信箱一旦积压超过页大小,更早的未处理信就
+    滑出列表且不在幂等表里,永远不会被处理 —— 表现就是"某站的验证信凭空消失"。
+    ⚠️ 不按未读过滤:已读标记会因读信改变,处置未完成(release 待重试)的信
+    按未读列会消失、永远漏重试。幂等靠 mail_seen。
+    """
+    backend = _mail_cfg()["backend"]
+    try:
+        if backend == "agentmail":
+            return _list_msgs_agentmail(limit, max_pages)
+        return _list_msgs_agently(limit, max_pages)
+    except (CliAuthError, CliRateLimited):
+        raise             # 授权/限频交给上层(预检/退避),不当普通空列表吞掉
+    except Exception as e:
+        log(f"信箱读取失败:{type(e).__name__}: {str(e)[:100]}")
+        return []
+
+
+def read_msg(mid):
+    """返回 (正文文本, 收件人地址列表)。只读不处置(不改任何状态)。"""
+    if _mail_cfg()["backend"] == "agentmail":
+        return _read_msg_agentmail(mid)
+    return _read_msg_agently(mid)
 
 
 # ---------- 安全闸 ----------
@@ -850,10 +968,28 @@ def sweep_once():
 def preflight():
     """依赖必须在启动时就查明白,不能等到点链接时才静默失败。"""
     missing = []
-    ok, why = agently_ready()
-    if not ok:
-        log(f"⚠️ {why}")
-        missing.append("agently-cli")
+    mc = _mail_cfg()
+    if mc["backend"] == "agentmail":
+        if not mc["agentmail_key"] or not mc["agentmail_inbox"]:
+            log(f"⚠️ mail_backend=agentmail 但缺 agentmail_api_key / agentmail_inbox_id\n"
+                f"{AGENTMAIL_SETUP_GUIDE}")
+            missing.append("agentmail_config")
+        else:
+            try:
+                # UNVERIFIED:自检调用(list 1 条)按官方文档编写,未对真实服务实测
+                _agentmail_get(f"/inboxes/{mc['agentmail_inbox']}/messages?limit=1", timeout=30)
+            except (CliAuthError, CliRateLimited) as e:
+                log(f"⚠️ agentmail 自检失败:{e}")
+                missing.append("agentmail_auth")
+            except Exception as e:
+                log(f"⚠️ agentmail 自检调用失败:{type(e).__name__}: {str(e)[:100]}\n"
+                    f"{AGENTMAIL_SETUP_GUIDE}")
+                missing.append("agentmail_reachable")
+    else:
+        ok, why = agently_ready()
+        if not ok:
+            log(f"⚠️ {why}")
+            missing.append("agently-cli")
     if not (os.environ.get("LLM_KEY") or "").strip():
         log("⚠️ 缺 LLM_KEY —— 邮件意图分类不可用(LLM_ENDPOINT/LLM_KEY/LLM_MODEL)")
         missing.append("LLM_KEY")

@@ -10,7 +10,11 @@
     "author_email": "alex.chen.dev@gmail.com",
     "author_site": "https://example.com/"
   },
-  "_mailbox": "【必准备】收验证/审核邮件的信箱:注册免费 AgentMail 账号(agent.qq.com)+ npm i -g @tencent-qqmail/agently-cli + agently-cli auth login 授权一次。mail_sweeper.py 经 CLI 自动收信点验证链接,不在本文件配置",
+  "_mailbox": "【必准备】收验证/审核邮件的信箱,二选一(都免费):①agent.qq.com 注册 + npm i -g @tencent-qqmail/agently-cli + auth login(默认,不在本文件配置);②agentmail.to 注册拿 API key,填下面 agentmail_* 两个字段。mail_sweeper.py 靠它自动收信点验证链接",
+  "mail_backend": "agently",
+  "_mail_backend_说明": "agently(默认,走 agently-cli)| agentmail(走 agentmail.to REST)",
+  "agentmail_api_key": "",
+  "agentmail_inbox_id": "",
   "_llm": "【必准备】OpenAI 兼容端点。agent_submit.mjs / mail_sweeper.py 走环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL(降级链 LLM_FALLBACKS);下面的字段是给本仓其它工具用的",
   "llm_endpoint": "",
   "llm_key": "",
