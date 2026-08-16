@@ -1,0 +1,15 @@
+{
+  "name": "My AI Tool",
+  "url": "https://example.com/",
+  "tagline": "One-line pitch (≤80 chars)",
+  "description": "Two or three sentences about what your tool does, who it is for, and what makes it different. Used for directory description fields and comment signatures.",
+  "email": "you@example.com",
+  "twitter": "",
+  "logo_url": "",
+  "_llm_endpoint": "可选:OpenAI 兼容端点,如 http://127.0.0.1:8317/v1/chat/completions,留空=纯规则模式",
+  "llm_endpoint": "",
+  "llm_key": "",
+  "llm_model": "",
+  "_captcha": "可选:2Captcha key。有它才尝试过验证码;没有就进人工队列",
+  "capsolver_key": ""
+}

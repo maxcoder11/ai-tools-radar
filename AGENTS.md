@@ -29,6 +29,21 @@ cd <本目录> && python3 -m http.server 8899
 - 新视图加进 `VIEWS` 数组 + `SORTS` 映射 + I18N 双语键（zh/en 都要）。
 - 截图自测（有 playwright-core 的话）：起服务后访问四个 tab 各截一张。
 
+## outreach/（外链投放工具）
+
+用户看完数据要投放时用这个：
+
+```bash
+cd outreach && pip install playwright && playwright install chromium
+cp my_site.example.json my_site.json   # 必须先把示例站信息改成用户自己的
+python3 targets.py && python3 submit.py --limit 5 --show
+```
+
+- `my_site.json` 里的 name/url/description/email 必须替换成用户真实站点,别用示例值投
+- 先 `--limit 5 --show` 有头验证,没问题再放量;state.jsonl 是唯一状态源,别手改
+- manual(验证码)队列就交给用户人工处理,不要尝试自动过码
+- 改表单识别逻辑在 submit.py 的 FIELD_MAP / JS_FILL
+
 ## 数据更新
 
 本仓库只含数据快照。`scripts/` 下的聚合脚本（build_data / build_link_library / build_links_split）

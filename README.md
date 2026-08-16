@@ -26,6 +26,20 @@ python3 -m http.server 8899
 
 中英双语（右上角切换）。All views available in English via the toggle.
 
+## 看完数据想动手 · Outreach tool
+
+`outreach/` 是一个半自动外链投放器：把外链库里"给竞品发过 dofollow"的实证页变成你的投放清单。
+
+```bash
+cd outreach
+pip install playwright && playwright install chromium   # 或用本机已有浏览器:CHROME_BIN=/path/to/chrome
+cp my_site.example.json my_site.json                    # 填你的站点信息
+python3 targets.py                                      # 生成投放清单
+python3 submit.py --limit 20                            # 小批先试,--show 有头观察
+```
+
+特点：验证码进人工队列不硬刚、每域每天最多一次、状态断点续投、可选接入你自己的 LLM 端点生成上下文相关简介。详见 `outreach/README.md`。
+
 ## 数据说明 · Data notes
 
 - 流量/排名/渠道数据为第三方流量估算服务的估计值（SimilarWeb 口径），仅供研究参考

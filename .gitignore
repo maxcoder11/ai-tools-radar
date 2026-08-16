@@ -2,3 +2,6 @@
 *.log
 __pycache__/
 node_modules/
+outreach/my_site.json
+outreach/state.jsonl
+outreach/worklist.jsonl
