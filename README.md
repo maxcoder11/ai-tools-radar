@@ -62,6 +62,7 @@ data/data.json      # 站点榜单数据(15k+ 行)
 data/library.json   # 外链库(12k 页面)
 data/links/<domain>.json  # 单域 dofollow 明细(外链库按需加载)
 data/links/index.json     # 有明细的域名清单
+outreach/           # 外链投放管道(目标生成/LLM 投放代理/收信/终核)
 scripts/            # 数据聚合脚本(需要私有数据源,仅参考)
 ```
 
