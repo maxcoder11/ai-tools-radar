@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """build_links_split.py — 把 sem_dofollow.jsonl 按目标域拆成单域文件(08-16 用户定:
 外链库的价值 = 用户查竞品的 dofollow 来源决定去哪发链)。
-产出 toolradar/links/<domain>.json:[{u,s,t,a,p,f}]每域 top100(ascore 序,拉取时已按 page_ascore desc)。
+
+产出 <站点>/data/links/<domain>.json:`[{u,s,a,p,s2,f}]`
+  u=来源页 s=来源标题 a=锚文本 p=平台分类 s2=权重分(ascore) f=首见日期
+每域按 s2 降序**截前 100 条**(这是有意的体积上限,不是全量;README/AGENTS.md 的
+口径必须跟着说 top 100,别对外写"全部来源")。
+
+⚠️ DATA/OUT 是本机私有数据湖与站点目录的绝对路径,换机器/换仓要自己改。
 """
 import json
 from pathlib import Path

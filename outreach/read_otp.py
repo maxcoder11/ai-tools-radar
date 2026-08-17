@@ -47,10 +47,21 @@ URL = re.compile(r"https?://[^\s\"')\]<>]+")
 
 
 def _matches(dom_root, frm, subj):
-    """这封信是不是这个站发来的。**宽松匹配会让 agent 把别人的验证码填进表单**。"""
+    """这封信是不是这个站发来的。**宽松匹配会让 agent 把别人的验证码填进表单**。
+
+    【修】原实现是纯子串,与本文件开头承诺的"严格版"不符:dom_root="tools.com"
+    会命中 noreply@nottools.com。现在两边都要求边界 ——
+      发件人:域必须**等于根域或其子域**(按 @ 之后的 host 判,不是整串找);
+      主题:根域两侧必须是非域名字符(不能是 . - 或字母数字)。
+    """
     frm = (frm or "").lower()
     subj = (subj or "").lower()
-    return dom_root in frm or dom_root in subj
+    host = frm.rsplit("@", 1)[-1].strip(" <>\t")
+    if host == dom_root or host.endswith("." + dom_root):
+        return True
+    # 右边界也要排除 `.`,否则 tools.com 会命中主题里的 tools.com.evil(Codex P2)
+    return re.search(r"(?:^|[^A-Za-z0-9.\-])" + re.escape(dom_root)
+                     + r"(?![A-Za-z0-9.\-])", subj) is not None
 
 
 def _epoch(s):

@@ -220,22 +220,53 @@ function guessUrls(dom, prod) {
 // ============================================================
 const SPA_HINT = /__NEXT_DATA__|id="root"|id="app"|ng-app|data-reactroot|window\.__NUXT__/i;
 
+// 【修】并发上限。guessUrls 会产 15 bases × 8 slug 变体 = 120 个候选,原实现一个
+// Promise.all 全放出去 —— 对单一目标站的瞬时突发,WAF/限流几乎必中(而本项目在
+// driver 里专门写了"纪律:域间不连投",核验这边却对同一个站开 120 并发)。
+// 6 路够快,又不像扫描器。
+const PREFILTER_CONCURRENCY = +(process.env.VERIFY_PREFILTER_CONCURRENCY || 10);
+// 预筛整段的墙钟预算。**光靠并发上限挡不住超时**:120 个候选 / 并发 6 / 单请求 9s
+// 最坏就是 180s,正好等于下面单域看门狗的 180s 硬顶,而 Promise.race 又不会取消
+// 已经发出的请求 —— 于是"为了不打扰目标站"反倒把整域拖成 unknown。
+// 现在:并发 10 + 单请求 6s + 整段 40s 预算,到点就把剩下的候选当"没排除掉"交给渲染。
+const PREFILTER_BUDGET_MS = +(process.env.VERIFY_PREFILTER_BUDGET_MS || 40000);
+const PREFILTER_TIMEOUT_MS = 6000;
+
+async function mapLimit(items, limit, fn) {
+  const it = items[Symbol.iterator]();
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const { value, done } = it.next();
+      if (done) return;
+      await fn(value);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function cheapPrefilter(urls, prod, limit = 8) {
   const keep = [];   // 高优先:静态 HTML 里已经出现产品名
   const maybe = [];  // 低优先:排除不掉,需要渲染
   let resolved = 0;  // 拿到明确 HTTP 结论的次数 —— 用于证明"确实看过",不是没连上
-  await Promise.all(urls.map(async (u) => {
+  let skipped = 0;   // 超预算没来得及探的
+  const deadline = Date.now() + PREFILTER_BUDGET_MS;
+  await mapLimit(urls, PREFILTER_CONCURRENCY, async (u) => {
+    if (Date.now() > deadline) { maybe.push(u); skipped++; return; }  // 预算到点:不敢排除
     let r;
-    try { r = await get(u, { timeout: 9000 }); }
+    try { r = await get(u, { timeout: PREFILTER_TIMEOUT_MS }); }
     catch { maybe.push(u); return; }              // 网络异常 → 不敢排除
+    // 【修】被挡的不计 resolved:resolved 喂给"证据是否充分"的门槛,
+    // 而 403/429 恰恰说明我们没看到内容。原来它先 resolved++ 再判,等于把限流当证据。
+    if (r.status >= 500 || r.status === 403 || r.status === 429) { maybe.push(u); return; }
     resolved++;
     if ([404, 410, 451, 400].includes(r.status)) return;   // 明确不存在 → 丢
-    if (r.status >= 500 || r.status === 403 || r.status === 429) { maybe.push(u); return; }
     const body = r.text || '';
     if (body.toLowerCase().includes(prod.slug)) { keep.push(u); return; }
     // 静态 HTML 里没有产品名:是 SPA 壳子就留给渲染,是实打实的完整页面就丢
     if (SPA_HINT.test(body) || body.length < 1500) maybe.push(u);
-  }));
+  });
+  if (skipped) console.log(`  [verify] 预筛超 ${PREFILTER_BUDGET_MS / 1000}s 预算,`
+    + `${skipped}/${urls.length} 个候选未探(按"排除不掉"处理,不影响判死门槛)`);
   return { urls: [...keep, ...maybe].slice(0, limit), resolved };
 }
 
@@ -252,6 +283,13 @@ async function inspect(pg, url, prod) {
   if (!resp) return { error: 'nav:no-response' };
   const status = resp.status();
   const xrobots = resp.headers()['x-robots-tag'] || '';
+  // 【修】原来 >=400 一律 notFound,而调用方在此之后就置了 sawAnyPage=true ——
+  // 一个对所有路径回 403 的 WAF(或 429 限流)于是同时满足"看过页面"和"探到明确结论",
+  // 直接把域推向 offline_confirmed → 三次 → failed。**拿不到内容 ≠ 页面不存在**:
+  // 403/429/5xx 是"我们被挡在外面",只有 404/410 才是站方说"没有这个页"。
+  if (status === 403 || status === 429 || status >= 500) {
+    return { status, xrobots, blocked: true };
+  }
   if (status >= 400) return { status, xrobots, notFound: true };
 
   const scan = () => pg.evaluate((host) => {
@@ -349,6 +387,7 @@ async function verifyDomain(pg, dom, prod) {
   let networkErrors = 0;
   let sitemapsRead = 0;
   let probedPages = 0;   // 拿到明确 HTTP 结论的页面数(渲染的 + 预筛的)
+  let blockedPages = 0;  // 被 403/429/5xx 挡回的页面数 —— 不算证据,只用于解释判不了
 
   // 候选 URL 按探针优先级排队
   const plans = [];
@@ -382,6 +421,8 @@ async function verifyDomain(pg, dom, prod) {
     for (const url of urls) {
       const r = await inspect(pg, url, prod);
       if (r.error) { networkErrors++; continue; }
+      // 被挡(403/429/5xx)既不算"看过页面"也不算"明确结论" —— 它只说明我们进不去。
+      if (r.blocked) { blockedPages++; continue; }
       sawAnyPage = true;
       probedPages++;
       if (r.notFound || r.nothingFound) continue;   // 搜索页"无结果"文案=判负
@@ -469,13 +510,19 @@ async function verifyDomain(pg, dom, prod) {
   }
   // offline_confirmed 的门槛:sitemap 可读(能拿到站方的全量 URL 清单),
   // 或者至少探到过 10 个明确 HTTP 结论的页面。达不到就是 unknown_blocked,不判死。
-  const strong = sitemapsRead > 0 || probedPages >= 10;
+  // 【修】加 sawAnyPage:probedPages 把预筛拿到的 404 也算进来,而 path_guess 一次就
+  // 产 120 个候选 —— 一个对所有路径都回 404 的 WAF,轻松把 >=10 撑满,于是"证据充分"
+  // 恒真、unknown_blocked 近乎死代码,域被一路推向 offline_confirmed → 三次 → failed。
+  // 现在要求**至少真渲染看过一个页面**(证明站是活的、我们确实进得去),再谈判死。
+  const strong = sitemapsRead > 0 || (sawAnyPage && probedPages >= 10);
   return {
     result: strong ? 'offline_confirmed' : 'unknown_blocked',
     oracles_tried: tried.join(','),
     error: strong ? null
-      : `证据不足以判定未上线(sitemap 读到 ${sitemapsRead} 个,探到 ${probedPages} 页,网络错误 ${networkErrors} 次)`,
-    evidence: { sitemaps_read: sitemapsRead, probed_pages: probedPages, network_errors: networkErrors },
+      : `证据不足以判定未上线(sitemap 读到 ${sitemapsRead} 个,探到 ${probedPages} 页,`
+        + `被挡 ${blockedPages} 页,网络错误 ${networkErrors} 次)`,
+    evidence: { sitemaps_read: sitemapsRead, probed_pages: probedPages,
+                blocked_pages: blockedPages, network_errors: networkErrors },
   };
 }
 

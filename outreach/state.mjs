@@ -182,11 +182,19 @@ export function claimDelivery({
   const dom = canonDomain(domain);
   const ev = clean(evidence, 2000);
   const nt = clean(note, 600);
-  const cur = currentStatus(dom);
-  const from = cur ? cur.status : null;
-  if (from && DELIVERED.has(from)) return { claimed: false, from, to: from };
+  // 【修】原实现是无锁的"先查后追加":两个进程在 currentStatus() 与 append() 之间
+  // 交错,就会**都拿到 claimed=true** —— 实测 10 进程同时刻认领同一域,7 个都成功。
+  // 这是全系统防重复投递的**唯一**闸(只有 claimed=true 才允许对外 click/POST),
+  // 它一破,single-shot 教义就是空的。查与写必须在同一把锁内完成。
+  const { from, claimed } = withFileLock(STATE_FILE, () => {
+    const cur = currentStatus(dom);
+    const f = cur ? cur.status : null;
+    if (f && DELIVERED.has(f)) return { from: f, claimed: false };
+    append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
+    return { from: f, claimed: true };
+  });
+  if (!claimed) return { claimed: false, from, to: from };
 
-  append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
   recordEvent({
     domain: dom,
     event_type: from === 'delivery_ambiguous' ? 'attempt_end' : 'status_change',
@@ -261,14 +269,42 @@ export function recordCost({ provider, job = null, domain = null,
   });
 }
 
-/** 日预算熔断:今天某 provider 已花多少。账本不可读 = fail-closed 抛错。 */
+/** 日预算熔断:今天某 provider 已花多少。账本不可读 = fail-closed 抛错。
+ *
+ * 【修】原实现 try 的是 readJsonl —— 而它自己 `catch { return [] }` 吞掉一切错误,
+ * 这里的 catch 永远不可能进。于是账本 EACCES/EIO/被写坏时返回 0,
+ * capsolver 两个付费入口看到"今天没花钱"照常放行:注释写着 fail-closed,
+ * 实际是 fail-open,熔断在最该生效的时候静默失效。
+ * 现在自己读文件:ENOENT(还没花过钱)返回 0,其余原样抛给调用方按基建故障处理。
+ */
 export function spentToday(provider) {
-  let rows;
-  try { rows = readJsonl(COSTS_FILE); }
-  catch (e) { throw new Error(`成本账本读取失败(${String(e.message).slice(0, 60)}),fail-closed`); }
+  let raw;
+  try { raw = fs.readFileSync(COSTS_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT') return 0;
+    throw new Error(`成本账本读取失败(${String(e.message).slice(0, 60)}),fail-closed`);
+  }
   const today = nowUtc().slice(0, 10);
-  return rows.filter(r => r.provider === provider && String(r.ts || '').startsWith(today))
-    .reduce((s, r) => s + (Number(r.amount_usd) || 0), 0);
+  const lines = raw.split('\n').filter(Boolean);
+  let sum = 0;
+  for (let i = 0; i < lines.length; i++) {
+    let r;
+    try { r = JSON.parse(lines[i]); }
+    catch {
+      // 【修】原来坏行直接跳过、非法金额 `|| 0` 吞掉 —— 账本损坏时**少算花销**,
+      // 熔断照样放行,fail-closed 又一次名存实亡。少算 = 多花钱,必须抛。
+      // 例外:只有最后一行可以是写到一半的半截行(append 的固有竞态),跳过它。
+      if (i === lines.length - 1) continue;
+      throw new Error(`成本账本第 ${i + 1} 行损坏(非最后一行,不是写入竞态),fail-closed`);
+    }
+    if (!r || r.provider !== provider || !String(r.ts || '').startsWith(today)) continue;
+    const amt = Number(r.amount_usd);
+    if (!Number.isFinite(amt) || amt < 0) {
+      throw new Error(`成本账本第 ${i + 1} 行金额非法(${JSON.stringify(r.amount_usd)}),fail-closed`);
+    }
+    sum += amt;
+  }
+  return sum;
 }
 
 // ---------- 站点约束(带 TTL 的 append 日志,读取折叠:同 (domain,reason_code) 后者盖前者)----------
@@ -306,15 +342,44 @@ export function loadRecipe(domain) {
 }
 
 export function saveRecipe(domain, recipe, status, notes) {
-  const tmp = `${RECIPES_FILE}.tmp.${process.pid}`;
-  let all = {};
-  try { all = JSON.parse(fs.readFileSync(RECIPES_FILE, 'utf8')); } catch {}
-  all[canonDomain(domain)] = {
-    recipe, steps_count: recipe.length, proven_at: nowUtc(),
-    status: String(status), notes: String(notes || ''),
-  };
-  fs.writeFileSync(tmp, JSON.stringify(all, null, 1));
-  fs.renameSync(tmp, RECIPES_FILE);   // 同盘 rename 原子
+  // 【修】读→改→整文件覆写:两个 agent 并发给不同站沉淀 recipe 时,后写的会把
+  // 先写的那条抹掉且无声。creds.mjs 为**完全相同**的模式做足了排他锁(见它文件头
+  // "为什么需要锁"),这里一直裸跑 —— 同一个仓里同一个坑,修法照抄那份。
+  // driver 串行调 agent,今天撞不上;但 recipe 是"成功打法"的沉淀,丢了要重新探路。
+  withFileLock(RECIPES_FILE, () => {
+    const tmp = `${RECIPES_FILE}.tmp.${process.pid}`;
+    let all = {};
+    try { all = JSON.parse(fs.readFileSync(RECIPES_FILE, 'utf8')); } catch {}
+    all[canonDomain(domain)] = {
+      recipe, steps_count: recipe.length, proven_at: nowUtc(),
+      status: String(status), notes: String(notes || ''),
+    };
+    fs.writeFileSync(tmp, JSON.stringify(all, null, 1));
+    fs.renameSync(tmp, RECIPES_FILE);   // 同盘 rename 原子
+  });
+}
+
+/** 排他锁(O_EXCL + 陈旧接管),语义与 creds.mjs 的 acquire/release 一致。
+ *  用在两处:saveRecipe 的整文件覆写、claimDelivery 的"查当前态→追加认领行"。
+ *  后者是防重复投递的核心闸,查与写必须原子。函数声明有提升,调用点在定义之前无碍。 */
+function withFileLock(target, fn, waitMs = 8000) {
+  const lock = `${target}.lock`;
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, 'wx');       // O_CREAT|O_EXCL
+      fs.writeSync(fd, `${process.pid} ${nowUtc()}\n`);
+      fs.closeSync(fd);
+      try { return fn(); } finally { try { fs.unlinkSync(lock); } catch {} }
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {                                      // 陈旧锁(持锁进程已死)接管
+        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) { fs.unlinkSync(lock); continue; }
+      } catch { continue; }
+      if (Date.now() - t0 > waitMs) throw new Error(`recipe 锁等待超时:${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
 }
 
 // ---------- 终核(verify_link.mjs 用)----------

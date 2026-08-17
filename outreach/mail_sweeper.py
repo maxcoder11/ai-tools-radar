@@ -59,10 +59,13 @@ WAKE = threading.Event()
 def _on_wake(signum, frame):
     WAKE.set()
 LINK_RE = re.compile(r"https?://[^\s\"')\]>]+")
-# 【开源移植】端点/模型走环境变量(OpenAI 兼容),调用逻辑不动
-CCPA = os.environ.get("LLM_ENDPOINT", "https://api.openai.com/v1/chat/completions")
-LLM_MODELS = [os.environ.get("LLM_MODEL", "gpt-4o-mini")] + \
-    [m.strip() for m in os.environ.get("LLM_FALLBACKS", "").split(",") if m.strip()]
+# 【开源移植】端点/模型/key 统一走 llm_config(base URL 与完整地址都收,env 与
+# llm.json 都读;规则见 llm_config.py 文件头,与 JS 侧 llm_config.mjs 逐条一致)。
+# 调用逻辑不动:CCPA / LLM_MODELS / ccpa_key() 三个名字对下游保持原样。
+import llm_config  # noqa: E402
+_LLM = llm_config.load()
+CCPA = _LLM["url"]
+LLM_MODELS = _LLM["models"]
 _KEY = None
 DRY_RUN = False
 
@@ -183,9 +186,13 @@ def hook_events_moved():
         if not (base and tok):
             return False
         from curl_cffi import requests as _creq
+        # 【修】原来写死 http://127.0.0.1:7891(作者本机 mihomo),换台机器必然连不上,
+        # 而失败被下面的 except 静默吞掉 —— 这条兜底通道就此永远是哑的。
+        # 改走环境变量;没配就直连(本来也不该强依赖某台机器的代理端口)。
+        _px = (os.environ.get("WEBHOOK_PROXY") or os.environ.get("HTTPS_PROXY")
+               or os.environ.get("https_proxy") or "")
         r = _creq.get(base + "/healthz", impersonate="chrome",
-                      proxies={"http": "http://127.0.0.1:7891",
-                               "https": "http://127.0.0.1:7891"}, timeout=15)
+                      proxies={"http": _px, "https": _px} if _px else None, timeout=15)
         if r.status_code != 200:
             return False
         seq = int(r.json().get("seq", 0))
@@ -222,13 +229,11 @@ def save_state(s):
 
 
 def ccpa_key():
-    # 【开源移植】key 只从 env LLM_KEY 读,不再碰任何私有网关配置
+    # 【开源移植】key 走 llm_config 的统一解析口(env 或 llm.json),不碰私有网关配置
     global _KEY
     if _KEY:
         return _KEY
-    _KEY = (os.environ.get("LLM_KEY") or "").strip()
-    if not _KEY:
-        raise RuntimeError("LLM_KEY 未配置(见 outreach/README.md)")
+    _KEY = llm_config.require_llm("mail_sweeper")["key"]
     return _KEY
 
 
@@ -237,7 +242,7 @@ def _llm_once(model, messages):
                        "response_format": {"type": "json_object"}}).encode()
     req = urllib.request.Request(CCPA, data=body, headers={
         "Content-Type": "application/json", "Authorization": "Bearer " + ccpa_key()})
-    with urllib.request.urlopen(req, timeout=90) as r:
+    with llm_config.urlopen(req, timeout=90) as r:        # 本机端点绕开代理
         return json.loads(json.loads(r.read())["choices"][0]["message"]["content"])
 
 
@@ -432,7 +437,16 @@ def park_load():
 
 
 def park_save(items):
-    json.dump(items, open(PARK_FILE, "w"))
+    """原子写。【修】原来是裸 json.dump(open(...,"w")):写到一半崩就是空文件,
+    挂起的验证信全丢 —— 与 save_state 当年被烧过的是同一个坑(见它的注释),
+    那边已经硬化成 tmp+fsync+replace,这边一直没跟上。"""
+    os.makedirs(os.path.dirname(PARK_FILE), exist_ok=True)
+    tmp = PARK_FILE + f".tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(items, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PARK_FILE)
 
 
 def park_add(mid, frm, subj, snip, site):
@@ -455,13 +469,32 @@ def park_retry():
         site = resolve_alias(x["site"], KNOWN)
         if site in KNOWN:
             log(f"  挂起信追上账,补处理 {x['site']}")
+            ok = False
             try:
-                handle(x["mid"], x["from"], x["subject"], x["snippet"])
+                ok = handle(x["mid"], x["from"], x["subject"], x["snippet"])
             except Exception as e:
                 log(f"  补处理异常:{type(e).__name__} {str(e)[:80]}")
-            continue
+            # 【修】handle 返回 False 的语义是「这轮别处置,下轮再来」(浏览器接管期
+            # defer / LLM 判定全降级),**不是**「处理完了」。旧代码无条件 continue 把它
+            # 丢出挂起表:agent 正在这个站上跑时 defer 必然为真,验证链就此永远没人点
+            # —— park 为之而生的场景(信比账快)反倒成了它固定丢件的场景。
+            # 只有真处理掉才出表;没处理的留下,超 TTL 再按非库内落定。
+            if ok:
+                continue
         if time.time() - x["ts"] > PARK_TTL:
-            log(f"  {x['site']} 挂起超 2h 未见账,按非库内落定")
+            if site in KNOWN:
+                # 【修】库内站却 2 小时都没处理成(handle 一直返回 False):这不是
+                # "非库内",是卡住了。静默丢 = 验证信永久消失。转人工,别无声吞掉。
+                log(f"  ⚠️ {x['site']} 是库内站但挂起超 2h 仍未处理成,转人工(不丢件)")
+                try:
+                    _queue_human(None, site,
+                                 f"挂起的 {x.get('subject','')[:60]} 超 2h 未能自动处理"
+                                 f"(mid={x['mid']}),请人工看这封信",
+                                 blocker="park_stuck")
+                except Exception as e:
+                    log(f"  转人工失败(该信仍会丢):{e}")
+            else:
+                log(f"  {x['site']} 挂起超 2h 未见账,按非库内落定")
             continue
         keep.append(x)
     park_save(keep)
@@ -1307,6 +1340,13 @@ def preflight():
 
     【开源移植】curl_cffi / agentmail 不在标准库里:pip install agentmail curl_cffi。
     缺了会:agentmail 收不到信、每个验证链接都走 except 打"打开失败"。
+
+    【LLM 预检】llm_judge 判不出意图时只会返回 None、日志一行"下轮再判" ——
+    端点配错(地址不对/key 不对/不支持 response_format: json_object)在运行期
+    长得和"限流"一模一样,于是信越堆越多、验证链一条不点,而且没有任何东西会升级。
+    所以在这里实打实探一次(check_llm.probe,与 `python3 check_llm.py` 同一份实现):
+    不通就非零退出,把**运行期的静默永久失效换成启动期的响亮拒绝**。
+    SKIP_LLM_CHECK=1 可跳过(离线跑测试用)。
     """
     missing = []
     for mod in ("curl_cffi", "agentmail"):
@@ -1317,7 +1357,39 @@ def preflight():
     if missing:
         log(f"⚠️ 缺依赖 {missing} —— pip install {' '.join(missing)},"
             f"否则验证链接与 AgentMail 信箱会静默失效")
-    return not missing
+    if missing:
+        return False
+
+    if os.environ.get("SKIP_LLM_CHECK"):
+        log("(SKIP_LLM_CHECK=1,跳过 LLM 端点预检)")
+        return True
+    try:
+        import check_llm
+        cfg = llm_config.require_llm("mail_sweeper")
+        # 【修】原来只探 models[0]:主模型挂了但降级链可用时,llm_judge 本来跑得通,
+        # 预检却把常驻整个拦下。按 llm_judge 的真实行为来 —— 任一模型能用就放行。
+        ok, verdict, detail, good = False, "", "", None
+        for m in cfg["models"]:
+            ok, verdict, detail = check_llm.probe(cfg["url"], cfg["key"], m)
+            if ok:
+                good = m
+                break
+    except RuntimeError as e:                      # 缺 key:人话指引在 require_ 里
+        log(f"❌ {e}")
+        return False
+    except Exception as e:
+        log(f"⚠️ LLM 预检本身出错({type(e).__name__}: {str(e)[:80]}),按不通过处理")
+        return False
+    if not ok:
+        log(f"❌ LLM 端点不可用({verdict}):{detail}")
+        log(f"   端点 {cfg['url']} | 试过的模型 {'/'.join(cfg['models'])} | key {llm_config.mask(cfg['key'])}")
+        log("   跑 `python3 check_llm.py` 看完整诊断。邮件意图判定强依赖 json_object,"
+            "配不对就不开跑 —— 否则每轮静默判不出,验证信无人处置。")
+        return False
+    if good != cfg["models"][0]:
+        log(f"⚠️ 主模型 {cfg['models'][0]} 不可用,预检靠降级链的 {good} 通过 —— 建议查一下主模型")
+    log(f"LLM 预检通过:{good} @ {cfg['url']}({verdict})")
+    return True
 
 
 if __name__ == "__main__":

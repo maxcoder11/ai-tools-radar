@@ -8,8 +8,8 @@
 //      my_site.json 没配 capsolver_key 时验证码域标记 manual 转人工,不硬刚
 //
 // 开源化改造点(与生产版 backlinks-v2/node-tools/agent_submit.js 的差异):
-//   - LLM 端点走环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL(默认 OpenAI 兼容),
-//     降级链 LLM_FALLBACKS(逗号分隔);不再读任何私有网关配置
+//   - LLM 端点走 llm_config(LLM_BASE_URL/LLM_API_KEY/LLM_MODEL/LLM_FALLBACKS,或 llm.json;
+//     旧的 LLM_ENDPOINT/LLM_KEY 仍兼容);不再读任何私有网关配置
 //   - 账本 dbw(SQLite)→ state.mjs(state.jsonl + events/costs/constraints/human_tasks),
 //     状态枚举/迁移守卫/投递认领语义逐条对齐
 //   - 代理:--proxy 参数或 HTTPS_PROXY 环境变量,默认直连;无住宅出口基建
@@ -32,6 +32,7 @@ import * as credsFile from './creds.mjs';
 import * as wd from './wall_detect.mjs';
 import * as og from './outbound_guard.mjs';
 import { rootDomain } from './rootdomain.mjs';
+import * as llmcfg from './llm_config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));   // outreach/ 目录
 // 多产品:--kit <backlink-kit.json 路径> 指定产品资料包,默认 outreach/kit.json
@@ -41,8 +42,12 @@ const KIT_PATH = _kitIdx > 0 ? process.argv[_kitIdx + 1] : path.join(HERE, 'kit.
 const KIT = JSON.parse(fs.readFileSync(KIT_PATH, 'utf8'));
 const PY_BIN = process.env.PYTHON_BIN || 'python3';
 
-const LLM_ENDPOINT = process.env.LLM_ENDPOINT || 'https://api.openai.com/v1/chat/completions';
-const MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
+// LLM 端点/key/模型统一走 llm_config(base URL 与完整地址都收,env 与 llm.json 都读;
+// 规则见 llm_config.py 文件头,JS/Python 两份逐条一致)
+const LLM = llmcfg.load();
+const LLM_ENDPOINT = LLM.url;
+const MODEL = LLM.models[0];
+for (const w of LLM.warnings) console.log(`[llm] ${w}`);
 // 预算纪律:单站时间/验证码上限,烧尽则降档(emailed→blocked),不死磕
 const MAX_MINUTES = +(process.env.SUBMIT_MAX_MINUTES || 8);
 const WATCHDOG_PLAN = makeWatchdogPlan(MAX_MINUTES, dbw.BUSY_TIMEOUT_MS || 30000);
@@ -162,6 +167,11 @@ const PRODUCT_FACTS = (KIT.product.facts_for_screening ||
   `${PNAME} 是全新独立站:DR 低、月自然访客少,类目=${(KIT.product.categories || []).join('/')}`);
 // 遥测/统计/广告/风控端点:一律不算提交证据(2026-07-24 假成功审计后补,LLM 主循环与 recipe 快放共用)
 const TELEMETRY = /posthog|bugsnag|sentry\.io|plerdy|factors\.ai|mahon\.cloud|shopifysvc|monorail|cnzz|shujupie|fndrsp|pirsch\.io|doubleclick|googletagmanager|google-analytics|google\.com\/rmkt|\/rmkt\/collect|snapchat|facebook\.net|hotjar|clarity\.ms|mixpanel|amplitude|segment\.|heap\.io|umami|awswaf|datadog|newrelic|fullstory|mouseflow|logrocket|statcounter|histats|quantserve|scorecardresearch|cdn-cgi|challenge-platform|\/banner\/|impression|\/pixel|\/beacon|\/collect[?/]|\/api\/stats|\/api\/track|\/stat\.htm|telemetry|\/rum[?/]|analytics|pagead2\.googlesyndication|googlesyndication\.com\/pagead/i;
+// 【修】验证码类拒收文案。裸 `captcha|recaptcha` 会命中成功页里 reCAPTCHA 的
+// api.js 脚本标签 —— 同一个坑在 :871(fetch 直送分支)已经修过并写明"拒词要具体到
+// 文案",但主响应监听与 recipe 复放这两处一直没跟上,真投达因此被判成拒收。
+const CAPTCHA_REJECT = 'check the security|incorrect-?captcha|reCAPTCHA box|请勾选'
+  + '|captcha (?:is )?(?:required|invalid|incorrect|failed)|invalid captcha|captcha 错误';
 const FORBIDDEN = new RegExp(KIT.compliance.forbidden_claims_regex.map(p => p.replace(/^\(\?[a-z]+\)/, '')).map(p => `(?:${p})`).join('|'), 'i');
 
 // ---------- 站点约束(2026-07-25)----------
@@ -323,6 +333,16 @@ function forkAccountForProduct(dom, reason) {
 // 【08-11 十二轮评审 P1-3②】主流程的 pg 是 IIFE 里的 let,模块级函数看不到;
 // 由主流程在每个赋值点登记到 curPg,供 queueForHuman 等取当前 URL(取不到留空)。
 let curPg = null;
+// 【修】看门狗走的是 process.exit(),**同步终止,pending 的 finally 一律不执行** ——
+// 上一版把 browser.close() 挪进 finally 只覆盖了正常/异常收尾,强退这条路依然留孤儿
+// Chromium(driver 的 timeout=900 只杀直接子进程)。这里登记浏览器句柄,强退前同步杀掉。
+let curBrowser = null;
+function killBrowserSync() {
+  try {
+    const proc = curBrowser && curBrowser.process && curBrowser.process();
+    if (proc && proc.pid) process.kill(proc.pid, 'SIGKILL');   // close() 是异步的,来不及
+  } catch { /* CDP 模式没有子进程句柄;连的是用户自己的浏览器,本来也不该杀 */ }
+}
 function safePgUrl() { try { return curPg ? String(curPg.url() || '') : ''; } catch { return ''; } }
 
 function queueForHuman(dom, blocker, guidance, retry = {}) {
@@ -561,16 +581,18 @@ function emailOtp(dom) {
 }
 
 function llmKey() {
-  const k = process.env.LLM_KEY;
-  if (k && k.trim()) return k.trim();
-  throw new Error('LLM_KEY 未配置(环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL,见 outreach/README.md)');
+  // 【修】原来每次调用都 load() 一次:endpoint 在模块加载时就冻结了(LLM_ENDPOINT 常量),
+  // key 却是实时读的 —— run 期间改配置(或换 llm.json)会把**新供应商的 key 发给旧 endpoint**。
+  // 现在用模块加载时那一份,与 endpoint 同源同时刻;缺 key 的人话指引照旧。
+  if (!LLM.key) llmcfg.requireLlm('agent_submit');   // 只为抛出带指引的错误
+  return LLM.key;
 }
 
 // 降级链。**只放实测可用的** —— 2026-07-27 实测 gpt-5.6 返回 400(模型名已下线)、
 // grok-4.5 返回 403(额度用尽),它们留在链里的唯一作用就是让每次主模型抖动
 // 都白等两轮握手才轮到真能用的 claude。
 // 加回来之前请先用 scripts/check_llm.py 实测。
-const MODEL_FALLBACKS = (process.env.LLM_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean);
+const MODEL_FALLBACKS = LLM.models.slice(1);
 /** LLM 调用记账。
  *
  * ⚠️ 2026-07-27 审查 #9:这个文件原来**一分钱不记** —— 1643 个 LLM-in-loop 步全没入账。
@@ -1000,7 +1022,7 @@ async function actImpl(pg, a, dom) {
       if (!key) return 'turnstile sitekey 未找到';
       let token;
       try {
-        ({ token } = await cs.turnstile(pg.url(), key.key, key.action ? { metadata: { action: key.action } } : {}));
+        ({ token } = await cs.turnstile(pg.url(), key.key, key.action ? { metadata: { action: key.action } } : {}, { domain: dom }));
       } catch (e) {
         // 【08-01 实证】solver 拒收(幻影 key/数据畸形)不该打穿整站 —— 按幻影处理:
         // 进人工队列,本机先试裸提交(很多站点是服务端隐形防护,不需要 token)。
@@ -1040,7 +1062,7 @@ async function actImpl(pg, a, dom) {
       // 那一页上,直接取当前 DOM 给它 —— 比让它自己再抓一次更准,因为挑战页是
       // 绑 IP/UA 的,它抓到的和我们看到的可能不是同一份。
       const chalHtml = await pg.content().catch(() => '');
-      const r = await cs.cloudflareChallenge(pg.url(), proxy, ua, chalHtml);
+      const r = await cs.cloudflareChallenge(pg.url(), proxy, ua, chalHtml, { domain: dom });
       if (!r || !r.cookies) return 'AntiCloudflareTask 未拿到 cookie';
       const host = new URL(pg.url()).hostname.replace(/^www\./, '');
       const cookies = Object.entries(r.cookies).map(([name, value]) => ({ name, value, domain: '.' + host, path: '/' }));
@@ -1101,7 +1123,7 @@ async function actImpl(pg, a, dom) {
       });
       let usedInv = null;
       for (const inv of (hasCheckbox ? [false, true] : [true, false])) {
-        try { token = await cs.recaptchaV2(pg.url(), sitekey, { invisible: inv }); usedInv = inv; break; }
+        try { token = await cs.recaptchaV2(pg.url(), sitekey, { invisible: inv }, { domain: dom }); usedInv = inv; break; }
         catch (e) {
           err = e;
           // 【08-11 P1-新2】基建/预算熔断(账本不可用/日预算尽)不是这站的错:
@@ -1194,7 +1216,10 @@ async function actImpl(pg, a, dom) {
       let filled = 0;
       for (const el of await pg.$$('input:visible')) {
         const type = (await el.getAttribute('type')) || 'text';
-        const name = ((await el.getAttribute('name')) || '' + (await el.getAttribute('placeholder')) || '').toLowerCase();
+        // 【修】原写法 `a || '' + b || ''`:+ 比 || 紧,实际是 a || ('' + b) || '',
+        // 两个属性都缺时得到字面量字符串 "null",末尾的 || '' 是死代码。
+        const name = String((await el.getAttribute('name'))
+          || (await el.getAttribute('placeholder')) || '').toLowerCase();
         if (type === 'email') { await el.fill(regEmail); filled++; }
         else if (type === 'password') { await el.fill(pass); filled++; }
         else if (/^(name|username|user|nickname)/.test(name)) { await el.fill(PNAME); filled++; }
@@ -1274,23 +1299,31 @@ async function locate(pg, target, isButton = false) {
     for (const e of els) if (await e.isVisible().catch(() => false)) visEls.push(e);
     return visEls[idx] || null;
   }
+  // 【修】target 是 LLM 产出的自由文本,而 LLM 是看着页面内容写的 —— 里面出现一个
+  // 双引号就拼出非法选择器,Playwright 抛错穿出 actImpl/act/步循环,被最外层 catch
+  // 判成整站 blocked。同文件 :830 的 text= 兜底早就用 JSON.stringify 做对了,这里没跟上。
+  // JSON.stringify 产出的是带引号且已转义的字符串字面量,Playwright 选择器引擎认它。
+  const q = (t) => JSON.stringify(String(t ?? ''));
   if (isButton) {
     // 长文本目标:多半是 checkbox 的 label 文案,点 label 即可勾选
     if ((target || '').length > 15) {
-      const lab = await pg.$(`label:has-text("${target.slice(0, 40)}")`);
+      const lab = await pg.$(`label:has-text(${q(target.slice(0, 40))})`);
       if (lab) return lab;
       const cb = await pg.$('input[type=checkbox]:visible');
       if (cb) return cb;
     }
-    return (await pg.$(`button:has-text("${target}")`)) || (await pg.$(`[role=button]:has-text("${target}")`)) || (await pg.$(`a:has-text("${target}")`));
+    return (await pg.$(`button:has-text(${q(target)})`)) || (await pg.$(`[role=button]:has-text(${q(target)})`)) || (await pg.$(`a:has-text(${q(target)})`));
   }
-  return (await pg.$(`input[name="${target}"]`)) || (await pg.$(`textarea[name="${target}"]`)) || (await pg.$(`input[placeholder*="${target}"]`)) || (await pg.$(`label:has-text("${target}") input`));
+  return (await pg.$(`input[name=${q(target)}]`)) || (await pg.$(`textarea[name=${q(target)}]`)) || (await pg.$(`input[placeholder*=${q(target)}]`)) || (await pg.$(`label:has-text(${q(target)}) input`));
 }
 
 function resolveValue(v) {
   if (!v) return '';
-  if (VALUES[v]) return VALUES[v];
-  if (v.startsWith('slot:')) return VALUES[v.slice(5)] || '';
+  // 【修】v 来自 LLM,不可信:原来用 VALUES[v] 直查,"constructor"/"toString" 这类
+  // 会拿到 Object.prototype 上的东西(最终退化成填充失败,但没必要留这个口子)。
+  const own = (k) => Object.prototype.hasOwnProperty.call(VALUES, k);
+  if (own(v)) return VALUES[v];
+  if (v.startsWith('slot:')) { const k = v.slice(5); return own(k) ? VALUES[k] : ''; }
   return v; // LLM 基于 kit 事实的组合值,过 FORBIDDEN 闸门
 }
 
@@ -1456,7 +1489,9 @@ async function replayRecipe(pg, dom, recipe) {
           // ("check the security reCAPTCHA box"),毒 recipe 会无限伪成功。命中拒词 =
           // recipe 失效,回退 LLM 探路重打。body 截 3000 —— 拒收文案可能埋在整页中段。
           const body = (await r.text().catch(() => '')).slice(0, 3000);
-          if (/error|invalid|fail|denied|go.?back|captcha|recaptcha|try.?again|please (go|check|fill|complete|verify)|required field|missing|incorrect/i.test(body)) {
+          if (new RegExp('error|invalid|fail|denied|go.?back|' + CAPTCHA_REJECT
+              + '|try.?again|please (go|check|fill|complete|verify)|required field|missing|incorrect',
+              'i').test(body)) {
             badHit = `POST ${r.url().slice(0, 60)} → ${r.status()} ${body.replace(/\s+/g, ' ').slice(0, 120)}`;
             return;
           }
@@ -1473,13 +1508,15 @@ async function replayRecipe(pg, dom, recipe) {
   for (const s of recipe.steps) {
     let r;
     if (s.action === 'fill') {
-      const el = await locate(pg, s.target_hint) || await pg.$(`input[name*="${s.target_hint}" i],textarea[name*="${s.target_hint}" i],input[placeholder*="${s.target_hint}" i],label:has-text("${s.target_hint}") input,label:has-text("${s.target_hint}") textarea`);
+      const h = JSON.stringify(String(s.target_hint ?? ''));   // 同 locate():别裸拼进选择器
+      const el = await locate(pg, s.target_hint) || await pg.$(`input[name*=${h} i],textarea[name*=${h} i],input[placeholder*=${h} i],label:has-text(${h}) input,label:has-text(${h}) textarea`);
       if (!el) return { ok: false, log, fail: `复放失败:找不到字段 ${s.target_hint}` };
       const v = resolveValue(s.value);
       if (FORBIDDEN.test(v)) return { ok: false, log, fail: '红线拦截' };
       await el.fill(v); r = `fill ${s.target_hint}`;
     } else if (s.action === 'click') {
-      const el = await pg.$(`button:has-text("${s.target_hint}")`) || await pg.$(`[role=button]:has-text("${s.target_hint}")`) || await pg.$(`a:has-text("${s.target_hint}")`);
+      const h = JSON.stringify(String(s.target_hint ?? ''));
+      const el = await pg.$(`button:has-text(${h})`) || await pg.$(`[role=button]:has-text(${h})`) || await pg.$(`a:has-text(${h})`);
       if (!el) return { ok: false, log, fail: `复放失败:找不到按钮 ${s.target_hint}` };
       // 【08-11 十一轮评审 P1-6/P1-7】recipe 的 click 多为最终提交,同一个
       // 双投坑:click() 派发后 reject,catch 补 DOM click = 第二次提交。
@@ -1730,6 +1767,16 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
   // 【08-08 实证】主循环内的预算检查挡不住「单个 await 挂死」(page.goto/evaluate
   // 不返回时循环永远不转,legrand-jp/winebooks 挂 54-65 分钟实证)。
   // 独立看门狗:MAX_MINUTES+2 分钟到点无条件强退,不依赖任何异步状态。
+  // 【修】触发点用 WATCHDOG_PLAN.triggerMs,不再用裸的 (MAX_MINUTES+2)*60000:
+  // 计划值把触发点钳在「收尾写账 + 人工入队最坏耗时」之前,保证一定赶在 driver
+  // 的 900s 包装硬杀前落账。旧写法下 SUBMIT_MAX_MINUTES=20 时看门狗 22 分钟才响、
+  // driver 15 分钟就杀 —— 这段落账逻辑一次都跑不到,域被兜底成 blocked。
+  // 计划算好了却全文件没人引用,正是"代码全对、执行路径到不了"的又一例。
+  const WD_MIN = Math.round(WATCHDOG_PLAN.triggerMs / 6000) / 10;
+  if (WATCHDOG_PLAN.triggerMs < (MAX_MINUTES + 2) * 60000) {
+    console.log(`[看门狗] 触发点按 900s 硬杀预算钳到 ${WD_MIN} 分钟`
+      + `(SUBMIT_MAX_MINUTES=${MAX_MINUTES} 要求 ${MAX_MINUTES + 2} 分钟)`);
+  }
   setTimeout(() => {
     // 【08-10 修】强退前必须落账:原来只打日志就 exit,域「无终局无落库」
     // 被驱动兜底成无声 blocked,真实原因(await 挂死)永远丢。
@@ -1773,24 +1820,25 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
             } catch {}
           } else {
             const watchR = upsert(dom, 'delivery_ambiguous',
-              `agent_submit 看门狗:超 ${MAX_MINUTES + 2} 分钟硬顶,submit 已派发、终局未定,人工裁决不重投`);
+              `agent_submit 看门狗:超 ${WD_MIN} 分钟硬顶,submit 已派发、终局未定,人工裁决不重投`);
             actualStatus = watchR && watchR.to ? watchR.to : 'delivery_ambiguous';
           }
           if (actualStatus === 'delivery_ambiguous') {
-            queueAmbiguousTerminal(dom, `看门狗超 ${MAX_MINUTES + 2} 分钟强退`);
+            queueAmbiguousTerminal(dom, `看门狗超 ${WD_MIN} 分钟强退`);
             console.error(`[${dom}] DELIVERY_AMBIGUOUS 看门狗强退:submit 已派发终局未落账,不重投待人工`);
           } else {
             console.error(`[${dom}] 看门狗写 ambiguous 被守卫拒绝,实际终局 ${actualStatus}`);
           }
         }
-        console.log(`[看门狗] 超 ${MAX_MINUTES + 2} 分钟硬顶,强退(submit 终态已对账)`);
+        console.log(`[看门狗] 超 ${WD_MIN} 分钟硬顶,强退(submit 终态已对账)`);
       } else {
-        upsert(dom, 'blocked', `agent_submit 看门狗:超 ${MAX_MINUTES + 2} 分钟硬顶(单步 await 挂死),按 blocked 记`);
-        console.log(`[看门狗] 超 ${MAX_MINUTES + 2} 分钟硬顶,强退(已落账)`);
+        upsert(dom, 'blocked', `agent_submit 看门狗:超 ${WD_MIN} 分钟硬顶(单步 await 挂死),按 blocked 记`);
+        console.log(`[看门狗] 超 ${WD_MIN} 分钟硬顶,强退(已落账)`);
       }
     } catch {}
+    killBrowserSync();                 // exit() 会跳过 finally,这里同步收
     process.exit(process.exitCode || 2);
-  }, (MAX_MINUTES + 2) * 60000).unref();
+  }, WATCHDOG_PLAN.triggerMs).unref();
   const useCdp = process.argv.includes('--cdp');
   const si = process.argv.indexOf('--steps');
   const maxSteps = si > 0 ? +process.argv[si + 1] : 24;
@@ -1987,6 +2035,7 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       }, true);
     });
   }
+  curBrowser = useCdp ? null : browser;   // CDP 连的是用户浏览器,不登记也不杀
   let pg = await ctx.newPage();
   curPg = pg;                  // 登记当前页,queueForHuman 等模块级函数取 URL 用
   pgRef.p = pg;                // 登记自己,弹窗治理豁免(CDP 模式下才有意义)
@@ -2039,7 +2088,10 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       // mine 通道载荷恒带产品指纹(我们自己发的),伪实锤唯一闸门是 bad ——
       // 但它不认识"Please go back and make sure you check the security reCAPTCHA box"
       // 这类规劝式拒收(#30 两站实证:被拒还判 success、还沉淀了毒 recipe)。补齐拒词。
-      const bad = /error|invalid|fail|denied|unauthor|forbidden|not.?logged|未登录|失败|go.?back|captcha|recaptcha|try.?again|required field|please (go|check|fill|complete|verify)|missing|incorrect|"code"\s*:\s*[45]\d\d|已经停止|已停止|不再接受|停止提交|暂停收录/i.test(body);
+      const bad = new RegExp('error|invalid|fail|denied|unauthor|forbidden|not.?logged|未登录|失败'
+        + '|go.?back|' + CAPTCHA_REJECT + '|try.?again|required field'
+        + '|please (go|check|fill|complete|verify)|missing|incorrect'
+        + '|"code"\\s*:\\s*[45]\\d\\d|已经停止|已停止|不再接受|停止提交|暂停收录', 'i').test(body);
       // 生命周期前置接口(存在性检查/登录/注册/OTP/会话)不算提交实锤,即使载荷带产品名
       const preflight = /exist|check|validate|verify|otp|login|signin|register|signup|\/auth|session|refresh|captcha/i.test(u);
       if ((mine || semanticEndpoint) && receiptStatus && !bad && !preflight) {
@@ -2543,9 +2595,15 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       }
       console.log(`[${dom}] EXC ${e.message.slice(0, 150)}`);
     }
+  } finally {
+    // 【修】原来这两行在 try/catch **之后**裸放:catch 里有两条 `throw ue`(写账
+    // 失败重抛)会跳过它们,Chromium 就此变成孤儿进程 —— 而 driver 的
+    // subprocess.run(timeout=900) 只杀直接子进程,杀不到浏览器。放进 finally,
+    // 无论正常收尾、异常收尾还是 catch 内重抛,都保证关掉。
+    // (try 内几处提前 return 也各自关过一次;browser.close() 幂等,重复调用无害。)
+    await closeCdpTabs().catch(() => {});
+    await browser.close().catch(() => {});
   }
-  await closeCdpTabs();
-  await browser.close();
 })().catch(e => {
   // 【08-11 九轮评审 P1-2】LEDGER_WRITE_FAILED 逃到顶层也要 exit 43(消息含标记,
   // 驱动按文本兜底识别),其余未捕获故障照旧 exit 1
@@ -2556,5 +2614,6 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
     if (CURRENT_DOM) queueAmbiguousTerminal(CURRENT_DOM, `顶层 FATAL:${String(e && e.message || e).slice(0, 160)}`);
     console.error(`DELIVERY_AMBIGUOUS submit 已派发,进程未落终局(FATAL),不重投待人工`);
   }
+  killBrowserSync();                   // 同上:exit() 前同步收掉浏览器
   process.exit(process.exitCode || (e && e.ledger ? 43 : 1));
 });

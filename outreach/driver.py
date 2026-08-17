@@ -18,7 +18,8 @@
   CF 签名住宅出口重投、cloak 指纹内核救援。
 用法:
   python3 driver.py [--limit 20] [--steps 24] [--loop]
-环境变量:LLM_ENDPOINT/LLM_KEY/LLM_MODEL 必配;HTTPS_PROXY 可选;NODE_BIN 指定 node;
+配置:LLM 端点见 llm_config.py(LLM_BASE_URL/LLM_API_KEY/LLM_MODEL 或 llm.json,必配);
+  HTTPS_PROXY 可选;NODE_BIN 指定 node;
   AUTHOR_URL_POOL 逗号分隔的评论作者网址池(默认只有 kit 主域)。
 """
 import hashlib
@@ -30,9 +31,14 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import state  # noqa: E402  账本唯一写入口(状态枚举 + 迁移守卫),别绕过它裸写
+import llm_config  # noqa: E402  LLM 端点/key/模型的唯一解析口(env 或 llm.json)
+
 HERE = Path(__file__).resolve().parent
 WORKLIST = HERE / "worklist.jsonl"
-STATE = HERE / "state.jsonl"
+# 账本路径跟 state.py 走(它认 OUTREACH_STATE_DIR),别各写一份否则读写分叉
+STATE = Path(state.STATE_FILE)
 LOGDIR = HERE / "run" / "agent_logs"
 NODE = os.environ.get("NODE_BIN", "node")
 KIT = os.environ.get("KIT", str(HERE / "kit.json"))
@@ -102,10 +108,36 @@ def load_state():
 
 
 def save_state(src, status, note=""):
-    with open(STATE, "a") as f:
-        f.write(json.dumps({"src": src, "status": status, "note": note[:150],
-                            "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())},
-                           ensure_ascii=False) + "\n")
+    """写账本。**必须走 state.upsert_submission 的迁移守卫,不许裸追加。**
+
+    driver 只有两处写:包装超时兜底、无声退出兜底 —— 两处都可能发生在 agent
+    已经把表单投出去之后。裸追加 blocked 会把 pending_review/success 打成非终态,
+    该域下一波被重选重投 = 重复提交(比漏投更糟,正是全系统守卫要防的那件事)。
+    守卫拒绝时只打日志、不改状态;账本表达不了的域(非法域名/未知状态)如实报错,
+    宁可不记也不硬写。
+    """
+    try:
+        r = state.upsert_submission(src, status, note=note[:150],
+                                    source="driver", reason_code="local_error")
+    except ValueError as e:
+        print(f"  [账本] {src} 写 {status} 被拒:{e}", flush=True)
+        return
+    if not r.get("written"):
+        print(f"  [账本] 状态守卫拒绝 {r['from']} → {status}"
+              f"(投达态不被兜底打回),{src} 终局保持 {r['from']}", flush=True)
+
+
+def _key(src):
+    """账本键。**必须与写入端同口径** —— state.upsert_submission 会 canon(剥 www./
+    小写/去端口),这里查询时不 canon 的话,worklist 里一个 `www.foo.com` 就会
+    「写进 foo.com、查 www.foo.com」永远查不到 → 该域每波都被重选重投。
+    今天的 library.json 里 src 全是 canon 形式(实测 0 个带 www、0 个大写),
+    所以触发不了;但键的一致性不能靠数据碰巧干净。canon 不了就原样(与写入端同样降级)。
+    """
+    try:
+        return state.canon_domain(src)
+    except ValueError:
+        return src
 
 
 def pick_batch(limit):
@@ -114,7 +146,7 @@ def pick_batch(limit):
     todo = []
     for line in open(WORKLIST):
         r = json.loads(line)
-        prev = st.get(r["src"])
+        prev = st.get(_key(r["src"]))
         if prev:
             if prev.get("ts", "").startswith(today):
                 continue                        # 每域每天一次
@@ -152,6 +184,9 @@ def run_site(r, steps):
         out = "(包装超时 900s)"
         # 包装超时=true 僵尸:agent 被杀、行没写成,域永远满足「未投过」,每波重选
         # 白烧 15 分钟。必须补记 blocked,让「当天有行」闸把它排除。
+        # 【修】经 save_state 的守卫写:agent 若已投达(pending_review/success/
+        # emailed/ambiguous),这条 blocked 会被拒 —— 那种域本来就在 TERMINAL 里,
+        # 不靠「当天有行」闸也不会被重选,不需要、也绝不能把它打回可重投。
         save_state(dom, "blocked", "agent_submit 包装超时(900s 硬顶),按 blocked 记")
     for line in out.splitlines():
         # 只转关键诊断行;完整输出落 run/agent_logs/<domain>.log
@@ -172,7 +207,7 @@ def run_site(r, steps):
     # 无声退出兜底:agent 无论因何没留下 state 行(静默崩溃),补记 blocked。
     # 例外:SILENT_SKIP_MARKERS 是 agent 故意干净退出(域留池)的设计,不补记。
     st = load_state()
-    cur = st.get(dom)
+    cur = st.get(_key(dom))          # 与写入端同口径,别用原始域回读(会看不见 canon 行)
     today = time.strftime("%Y-%m-%d", time.gmtime())
     if (not cur or not cur.get("ts", "").startswith(today)) \
             and not any(k in out for k in SILENT_SKIP_MARKERS):
@@ -188,8 +223,14 @@ def main():
         limit = int(args[args.index("--limit") + 1])
     if "--steps" in args:
         steps = int(args[args.index("--steps") + 1])
-    if not (os.environ.get("LLM_KEY") or "").strip():
-        sys.exit("缺 LLM_KEY(LLM_ENDPOINT/LLM_KEY/LLM_MODEL,见 README)")
+    try:
+        _llm = llm_config.require_llm("driver")     # 缺 key 就在这里停,别放一整波空跑
+    except RuntimeError as e:
+        sys.exit(str(e))
+    for w in _llm["warnings"]:
+        print(f"[llm] {w}", flush=True)
+    print(f"[llm] 端点 {_llm['url']} | 模型 {' → '.join(_llm['models'])} | "
+          f"key {llm_config.mask(_llm['key'])}", flush=True)
     if not Path(KIT).exists():
         sys.exit(f"缺 {KIT}(cp kit.example.json kit.json 后改成你的产品资料)")
     while True:

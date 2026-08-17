@@ -22,12 +22,22 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const API = 'https://api.capsolver.com';
 
 function siteCfg() {
-  try { return JSON.parse(fs.readFileSync(path.join(HERE, 'my_site.json'), 'utf8')); }
+  try { return JSON.parse(fs.readFileSync(process.env.OUTREACH_MY_SITE || path.join(HERE, 'my_site.json'), 'utf8')); }
   catch { return {}; }
 }
 
-/** 打码 key 是否已配置。没配 = 验证码站转人工,调用方先查这个再走付费路径。 */
-export function hasKey() { return !!String(siteCfg().capsolver_key || '').trim(); }
+/** 打码 key 是否已配置。没配 = 验证码站转人工,调用方先查这个再走付费路径。
+ *  【修】原来只看 capsolver_key —— 只配了 twocaptcha_key 的用户会被一路标成 manual,
+ *  连降级通道的门都摸不到(而且就算摸到,key() 抛的错不带 .terminal,也走不到降级)。
+ *  现在任一供应商有 key 就算"能解",具体走哪条由 solveWithFallback 决定。 */
+export function hasKey() {
+  const c = siteCfg();
+  return !!(String(c.capsolver_key || '').trim() || String(c.twocaptcha_key || '').trim());
+}
+
+/** 各供应商是否可用(solveWithFallback 据此决定从哪条腿起跑)。 */
+function hasCapsolver() { return !!String(siteCfg().capsolver_key || '').trim(); }
+function has2c() { return !!String(siteCfg().twocaptcha_key || '').trim(); }
 
 function key() {
   const k = String(siteCfg().capsolver_key || '').trim();
@@ -269,15 +279,32 @@ async function pollResult2c(taskId, timeoutMs = 120000) {
  */
 async function solveWithFallback(payload, timeoutMs = 120000, meta = {}) {
   let csErr;
-  try {
-    const taskId = await createTask(payload, meta);
-    return { solution: await pollResult(taskId, timeoutMs), provider: 'capsolver' };
-  } catch (e) {
-    if (!e.terminal) throw e;              // 网络瞬态/超时等:不降级,原样上抛
-    csErr = e;
+  if (hasCapsolver()) {
+    try {
+      const taskId = await createTask(payload, meta);
+      return { solution: await pollResult(taskId, timeoutMs), provider: 'capsolver' };
+    } catch (e) {
+      if (!e.terminal) throw e;            // 网络瞬态/超时等:不降级,原样上抛
+      csErr = e;
+    }
+  } else {
+    // 【修】没配 capsolver 但配了 2Captcha:直接走降级腿,别拿"缺 capsolver_key"
+    // 当终态错误上抛(那样 2Captcha 这条腿永远用不上)。
+    if (!has2c()) throw new Error('my_site.json 既没有 capsolver_key 也没有 twocaptcha_key');
+    csErr = new Error('未配 capsolver_key,直接走 2Captcha');
   }
   const t2 = to2CaptchaTask(payload);
-  if (!t2) throw csErr;
+  if (!t2) {
+    // 【修】2Captcha 没有对应任务类型(AntiCloudflareTask / VisionEngine)。
+    // 只配了 2Captcha 的用户撞上整页 CF 挑战时,原来抛的是普通错 → 顶层落 blocked,
+    // 既没进人工队列也没标 manual。打 noSolver:调用方按"有验证码但没解题能力"转人工。
+    if (!hasCapsolver()) {
+      const e = new Error(`${payload && payload.type} 只有 CapSolver 能解,而当前只配了 twocaptcha_key`);
+      e.noSolver = true;
+      throw e;
+    }
+    throw csErr;
+  }
   console.warn(`[capsolver] ${payload.type} 终态失败(${csErr.message}),降级 2Captcha ${t2.type}`);
   try {
     const taskId = await createTask2c(t2, meta);
@@ -294,52 +321,52 @@ async function solveWithFallback(payload, timeoutMs = 120000, meta = {}) {
 }
 
 // Cloudflare Turnstile(含 managed):返回 {token, ua}
-export async function turnstile(url, sitekey, opts = {}) {
+export async function turnstile(url, sitekey, opts = {}, meta = {}) {
   const { solution: s } = await solveWithFallback({
     type: 'AntiTurnstileTaskProxyLess', websiteURL: url, websiteKey: sitekey, ...opts,
-  });
+  }, 120000, meta);
   return { token: s.token, ua: s.userAgent };
 }
 
 // 拼图滑块:传背景图+拼块图(base64),返回滑动距离(px)。VisionEngine 不走降级链。
-export async function sliderDistance(bgBase64, pieceBase64) {
+export async function sliderDistance(bgBase64, pieceBase64, meta = {}) {
   const taskId = await createTask({
     type: 'VisionEngine', module: 'slider_1',
     imageBackground: bgBase64, image: pieceBase64,
-  });
+  }, meta);
   const s = await pollResult(taskId, 60000);
   return s.distance;
 }
 
 // reCAPTCHA v2:返回 gRecaptchaResponse;invisible=true 时用 isInvisible 任务参数
-export async function recaptchaV2(url, sitekey, opts = {}) {
+export async function recaptchaV2(url, sitekey, opts = {}, meta = {}) {
   const task = { type: 'ReCaptchaV2TaskProxyless', websiteURL: url, websiteKey: sitekey };
   if (opts.invisible) task.isInvisible = true;
-  const { solution: s } = await solveWithFallback(task, 180000);
+  const { solution: s } = await solveWithFallback(task, 180000, meta);
   return s.gRecaptchaResponse;
 }
 
 // reCAPTCHA v3:需要 pageAction(页面上 grecaptcha.execute 的 action 参数)
-export async function recaptchaV3(url, sitekey, pageAction) {
+export async function recaptchaV3(url, sitekey, pageAction, meta = {}) {
   const { solution: s } = await solveWithFallback({
     type: 'ReCaptchaV3TaskProxyless', websiteURL: url, websiteKey: sitekey, pageAction: pageAction || 'submit',
-  }, 180000);
+  }, 180000, meta);
   return s.gRecaptchaResponse;
 }
 
 // hCaptcha:返回 token
-export async function hcaptcha(url, sitekey) {
-  const { solution: s } = await solveWithFallback({ type: 'HCaptchaTaskProxyless', websiteURL: url, websiteKey: sitekey }, 180000);
+export async function hcaptcha(url, sitekey, meta = {}) {
+  const { solution: s } = await solveWithFallback({ type: 'HCaptchaTaskProxyless', websiteURL: url, websiteKey: sitekey }, 180000, meta);
   return s.gRecaptchaResponse;
 }
 
 // 整页 Cloudflare Challenge("Just a moment..." 403):AntiCloudflareTask
 // 需要稳定代理 + 一致 UA;cf_clearance 绑定 IP+UA,代理解出的票对直连浏览器无效。
 // CapSolver 要挑战页 HTML 才认得出是哪种挑战(不给就 ERROR_INVALID_TASK_DATA)。
-export async function cloudflareChallenge(url, proxy, ua, html) {
+export async function cloudflareChallenge(url, proxy, ua, html, meta = {}) {
   const task = { type: 'AntiCloudflareTask', websiteURL: url, proxy, userAgent: ua };
   if (html) task.html = String(html).slice(0, 200000);
-  const { solution: s } = await solveWithFallback(task, 180000);
+  const { solution: s } = await solveWithFallback(task, 180000, meta);
   return { cookies: s.cookies, ua: s.userAgent, token: s.token };
 }
 

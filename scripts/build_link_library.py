@@ -7,11 +7,18 @@
 按"链向 AI 站数 × ascore"排序,取 top 12000(控制前端加载体积)。
 """
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 DATA = Path("/Users/wy/cafe/backlinks-v2/datasets")
 SITE = Path("/Users/wy/cafe/toolradar")
+
+# 【修】bet/slot 原来是裸子串,过的是**自然语言标题**:实测 400 个域的 4 万条标题里
+# 217 条含 bet,全是 "…For Writing Better Headlines"、"between two invaders"、
+# "A better way to staff nonprofits" 这类正常博客页 —— 而这些恰恰是外链库最该收的页。
+# 加词边界:真赌博垃圾靠 "Situs Slot Gacor"、"Forum Slot 777" 里的独立词照样命中。
+ADULT = re.compile(r"porn|xxx|casino|\bbet(s|ting)?\b|\bslots?\b", re.I)
 
 
 def main():
@@ -27,7 +34,11 @@ def main():
         e = pages.get(url)
         if e is None:
             e = pages[url] = {
-                "src": urlparse(url).netloc.lower().replace("www.", ""),
+                # 【修】原来是不带锚的 .replace("www.","")——中间出现的 www.
+                # (en.www.example.com)会被改写成另一个域,netloc 还带着端口/userinfo。
+                # 全仓其它地方(state.mjs/state.py/outbound_guard/rootdomain)一律用
+                # 锚定的 ^www\.,这里跟上。
+                "src": re.sub(r"^www\.", "", (urlparse(url).hostname or "").lower()),
                 "title": (r.get("source_title") or "")[:80],
                 "plat": r.get("platform") or [],
                 "ascore": r.get("ascore") or 0,
@@ -49,7 +60,7 @@ def main():
         t = e["title"].lower()
         if t.startswith(("error", "404", "page not found", "just a moment")):
             continue                          # 死页/错误页不入库
-        if any(k in t for k in ("porn", "xxx", "casino", "bet", "slot")):
+        if ADULT.search(t):
             continue                          # 成人/博彩页不入库
         lib.append({"url": url, "src": e["src"], "title": e["title"],
                     "plat": ",".join(e["plat"]), "ascore": e["ascore"],

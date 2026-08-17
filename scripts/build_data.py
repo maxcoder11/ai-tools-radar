@@ -15,7 +15,12 @@ from pathlib import Path
 
 DATA = Path("/Users/wy/cafe/backlinks-v2/datasets")
 SITE = Path("/Users/wy/cafe/toolradar")
-JUNK = re.compile(r"^\d+\.|casino|porn|xxx|bet|slot|seo-|\.xyz$|\.top$|\.club$|\.shop$|\.store$", re.I)
+# 【修】bet 原来是裸子串:实测在榜域里命中 9 个,8 个是正常站(better.net /
+# betterprogramming.pub / teachbetter.ai / beta.raxa.io / bethnalgreenventures.com),
+# 只有 1 个是真博彩 —— 纯误伤。改成按域名分段命中(bet.com / betting-x.com / a-bet-b.com),
+# 代价是 betplentia 这类粘连写法漏掉,但 casino/slot 仍在,而误杀正常 AI 工具的代价更大。
+JUNK = re.compile(r"^\d+\.|casino|porn|xxx|(^|[.\-])(bet|bets|betting|sportsbook)([.\-]|$)"
+                  r"|slot|seo-|\.xyz$|\.top$|\.club$|\.shop$|\.store$", re.I)
 NOT = re.compile(r"^(github\.com|tinyurl\.com|bit\.ly|open\.spotify\.com|ringcentral\.com|"
                  r"digitalocean\.com|discogs\.com|myanimelist\.net|91mobiles\.com|liveinternet\.ru|"
                  r"creators\.spotify\.com|spotify\.com|canva\.com|figma\.com|notion\.so|dropbox\.com|"
