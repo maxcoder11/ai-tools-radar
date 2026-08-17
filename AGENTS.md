@@ -19,13 +19,17 @@ cd <本目录> && python3 -m http.server 8899
 - `data/data.json` — 站点数组。每行字段：
   `domain, name, desc_zh, desc_en, categories[], free, signup, visits, clicks, bl, bl_blog, global_rank, sem_traffic, sem_positions, mix{organic,direct,…}, monthly[[YYYY-MM-DD,visits]…], mom, kw[{n,v,c}], listed_month, n_dirs, registered, organic, dr`
 - `data/library.json` — 外链库页面数组：`url, src, title, plat, ascore, nt, targets[{d,a}], seen`
-- `data/links/<domain>.json` — 单域 dofollow 明细：`[{u,s,a,p,s2,f}]`（u=来源页,s=标题,a=锚文本,p=平台,s2=权重分,f=首见 epoch 秒）
-- `data/links/index.json` — 有明细的域名清单（字符串数组）。
+- `data/links/<domain>.json` — 单域 dofollow 明细：`[{u,s,a,p,s2,f}]`（u=来源页,s=标题,a=锚文本,p=平台,s2=权重分,f=首见 epoch 秒）。
+  **每域按 s2 降序截 top 100，不是全量**（1,360 域共 13.5 万行）；对外别说"全部来源"。
+- `data/links/index.json` — 有明细的域名清单（字符串数组，当前 1,360 个）。
 
 ## 改 UI 时的注意点
 
 - index.html 里 fetch 路径全部以 `data/` 开头，移动文件要同步改。
-- 数据文件加了 `?t=<timestamp>` 防缓存，别去掉。
+- 数据文件带 `?v=<DATA_VERSION>` 防缓存（常量在 index.html 顶部）。**换数据快照就改这个常量**；
+  别改回 `?t=Date.now()` —— 那会让 11MB 的 data.json 每次打开页面都重下，HTTP 缓存彻底失效。
+- 搜索框输入有 140ms 防抖：`render()` 要把 15k 个 `<tr>` 交给 innerHTML 建 DOM（实测约 327ms），
+  每敲一键重渲一次会丢帧。新增高频触发点时照此办理。
 - 新视图加进 `VIEWS` 数组 + `SORTS` 映射 + I18N 双语键（zh/en 都要）。
 - 截图自测（有 playwright-core 的话）：起服务后访问四个 tab 各截一张。
 
@@ -35,12 +39,17 @@ cd <本目录> && python3 -m http.server 8899
 
 ```bash
 cd outreach && npm install   # playwright-core;另需本机 Chrome 或 npx playwright install chromium
-cp my_site.example.json my_site.json     # 可选 capsolver_key;信箱走 agently-cli,不在此配
+python3 configure.py                     # LLM 端点 + 打码/收信 key(本机界面,带实测按钮)
+python3 check_llm.py                     # 或纯命令行验端点(连通性 + json_object)
 cp kit.example.json kit.json             # 产品资料包(填表槽位/forbidden_claims 红线)
 cp identities.example.json identities.json  # persona 池
-export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
 python3 targets.py && python3 driver.py --limit 5
 ```
+
+LLM 配置收口在 `llm_config.py` / `llm_config.mjs`(两份规则逐条一致):
+**填 base URL 就行**(`LLM_BASE_URL`,不用拼 `/chat/completions`),key 用
+`LLM_API_KEY`,也认通用的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 和文件 `llm.json`;
+旧名 `LLM_ENDPOINT` / `LLM_KEY` 仍可用但会提示改名。`python3 llm_config.py` 看当前解析结果。
 
 **开工前确认用户已准备**（缺了别跑）：OpenAI 兼容 LLM 端点（LLM_* 环境变量）、
 收信信箱（两条腿至少通一条，都免费：agent.qq.com 走 agently-cli `auth login`；
@@ -50,6 +59,13 @@ mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读�
 
 - kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投
 - 先 `driver.py --limit 5` 小批验证，没问题再放量；state.jsonl 是唯一状态源，别手改
+- **写账本只能走 `state.upsert_submission` / `state.mjs upsertSubmission`**，不许直接
+  往 state.jsonl 追加行：迁移守卫（投达态不许被打回 blocked/failed）就在那里，绕过去
+  = 把已投达的域重新放回可重投池 = 重复提交。driver.py 的 `save_state()` 已收口到守卫，
+  新加写入点照此办理
+- 单站时间预算：`SUBMIT_MAX_MINUTES`（默认 8，driver 传 10）。看门狗触发点由
+  `makeWatchdogPlan` 按 driver 的 900s 包装硬杀倒推，超过约 12 分钟会被**自动钳住**
+  （启动时打一行日志说明）——想让单站跑更久，得先把 driver 的 `timeout=900` 一起抬
 - 提交后验证邮件由 `mail_sweeper.py --loop` 自动处理（agently-cli 收信+LLM 判意图+点验证链接，
   四条安全闸别动）；先 `--dry-run` 演一遍再放--loop
 - 验证码站没配 capsolver_key 会标 manual 进 human_tasks.jsonl，人工处理，不要尝试自动过码

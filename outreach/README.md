@@ -8,8 +8,8 @@
 1. **付费**：LLM 选择付费/结账类动作 → 直接 `skipped_paid` 终止；
 2. **文案**：所有填入值必须过 `kit.json` 的 `forbidden_claims` 正则闸门，
    LLM 只能选预设槽位或基于 kit 事实组合；
-3. **验证码**：LLM 只声明验证码类型，解题由代码走 CapSolver，不让 LLM 编答案；
-   没配 `capsolver_key` → 该域标记 `manual` 进人工队列，不硬刚。
+3. **验证码**：LLM 只声明验证码类型，解题由代码走 CapSolver/2Captcha，不让 LLM 编答案；
+   两个打码 key 一个都没配 → 该域标记 `manual` 进人工队列，不硬刚。
 
 另有：投递认领（submit 类动作单发派发，防重复提交）、`delivery_ambiguous` 终态
 （永不自动重投，人工裁决）、状态迁移守卫（投达态不许被辅助步骤异常打回
@@ -17,9 +17,29 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 
 ## 开工前必须准备（缺了别跑）
 
-1. **OpenAI 兼容 LLM 端点**（必填）：环境变量 `LLM_ENDPOINT` / `LLM_KEY` /
-   `LLM_MODEL`（可选降级链 `LLM_FALLBACKS`，逗号分隔）。提交代理每一步都靠它决策，
-   邮件理解也靠它判意图；
+1. **OpenAI 兼容 LLM 端点**（必填）。提交代理每一步都靠它决策，邮件理解也靠它判意图。
+   最省事的配法是开配置界面：
+
+   ```bash
+   python3 configure.py        # 本机 127.0.0.1:8790，填完点「测试连接」再保存
+   ```
+
+   也可以纯命令行（优先级从高到低，三选一）：
+
+   ```bash
+   export LLM_BASE_URL=https://openrouter.ai/api/v1   # 填供应商文档给的 base URL 即可
+   export LLM_API_KEY=sk-...                         # 不用自己拼 /chat/completions
+   export LLM_MODEL=openai/gpt-4o-mini               # 可选降级链 LLM_FALLBACKS（逗号分隔）
+
+   export OPENAI_BASE_URL=... OPENAI_API_KEY=...     # 或直接吃现成的通用变量
+
+   cp llm.example.json llm.json                      # 或写文件（env 优先于文件）
+   ```
+
+   ⚠️ **模型必须支持 `response_format: json_object`** —— `mail_sweeper.py` 判的是
+   不可逆动作（写状态、点一次性验证链接），所以它不接受自由文本降级，而是
+   **启动时实探一次，不通就拒绝开跑**（`SKIP_LLM_CHECK=1` 可跳过）。
+   随时可单独验：`python3 check_llm.py`；
 2. **收信信箱，两条腿至少通一条**（都免费，收验证/审核邮件）：
    - `agent.qq.com`：注册账号 → `npm install -g @tencent-qqmail/agently-cli`
      → `agently-cli auth login` 授权一次（`auth status` 可查状态）；
@@ -41,7 +61,10 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 可选增强：
 
 - `capsolver_key`（+ `twocaptcha_key` 降级通道）：有了才自动过验证码的站；
-  各供应商日预算熔断 $50（`CAPSOLVER_DAILY_BUDGET_USD` 等可调）；
+  各供应商日预算熔断 $50（`CAPSOLVER_DAILY_BUDGET_USD` 等可调），出码前查 `costs.jsonl`、
+  **fail-closed**（账本读不出来就拒绝新建付费任务，不是当零花销放行）。
+  两个 key 配任意一个即可：只配 `twocaptcha_key` 时直接走 2Captcha，
+  两个都配时 capsolver 优先、终态错误自动降级 2Captcha；一个都没配才标 `manual` 转人工；
 - `HTTPS_PROXY`：出站代理。⚠️ 用 Cloudflare 整页挑战解题时必须配——
   `cf_clearance` 绑定 IP+UA，浏览器和解题必须同一出口。
 
@@ -51,10 +74,12 @@ blocked/failed）、站点约束 TTL、成功打法沉淀 recipe 下次快放。
 cd outreach
 npm install                                  # playwright-core
 pip install agentmail curl_cffi            # mail_sweeper 收信/点链依赖(两条腿共用)
-cp my_site.example.json my_site.json         # 填 capsolver(可选);信箱走 agently-cli
+
+python3 configure.py                         # 配 LLM 端点 + 打码/收信 key(带实测按钮)
+python3 check_llm.py                         # 或纯命令行验一次端点
+
 cp kit.example.json kit.json                 # 填你的产品资料(红线文案在此)
 cp identities.example.json identities.json   # 填你的 persona 池
-export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...
 
 python3 targets.py                           # 生成 worklist.jsonl(tier1 提交页优先)
 node agent_submit.mjs https://某站/submit --steps 2   # 单站干跑验证装载
@@ -78,8 +103,12 @@ state.jsonl 记 `email_verified`，卡死的 blocked 站自动回池重投；收
 
 - 四路探针：已记录 URL → sitemap → 站内搜索 → 路径枚举；`oracles_tried` 记录
   试过哪些，证明 offline 是真的找过而不是没找到；
-- 三态：`online` / `offline_confirmed`（sitemap 可读或 ≥10 页明确结论才判）/
-  `unknown_network` / `unknown_blocked` —— 判不了的绝不写成"未上线"；
+- 三态：`online` / `offline_confirmed`（sitemap 可读，或**真渲染看过至少一页**
+  且探到 ≥10 页明确结论才判）/ `unknown_network` / `unknown_blocked` ——
+  判不了的绝不写成"未上线"。**403/429/5xx 只说明"我们被挡在外面",既不算看过页面
+  也不算明确结论** —— 拿不到内容 ≠ 页面不存在,WAF/限流不该把域推向判死；
+  预筛并发上限 10、单请求 6s、整段 40s 墙钟预算（`VERIFY_PREFILTER_CONCURRENCY` /
+  `VERIFY_PREFILTER_BUDGET_MS` 可调）:既不对单站开突发,也不会把单域拖过 180s 看门狗；
 - SEO 价值字段：rel（**nofollow 判定**）、meta robots、X-Robots-Tag、canonical、
   跳转落地；侧栏/widget 回显锚不算收录证据；
 - 每次核验追加 `verifications.jsonl`（默认只读，不动状态）。
@@ -132,6 +161,9 @@ node verify_link.mjs example.com               # 指定域
 | `driver.py` | scripts/rolling_submit.py 简化 | 滚动驱动：选池/节流/退避/persona 轮换 |
 | `verify_link.mjs` | node-tools/verify_link.js | 终核器：四路探针 + 三态 + nofollow 判定 |
 | `esp_hosts.json` | scripts/esp_hosts.json | ESP 跳转域白名单（唯一来源） |
+| `llm_config.py` / `.mjs` | （开源版新增） | LLM 端点配置唯一解析口，两份规则逐条一致 |
+| `check_llm.py` | scripts/check_llm.py | 端点自检（连通性 + json_object），启动预检共用 |
+| `configure.py` | （开源版新增） | 本机配置界面，只绑 127.0.0.1 |
 
 ### driver.py 对照生产 rolling_submit.py 的取舍
 
@@ -141,10 +173,64 @@ node verify_link.mjs example.com               # 指定域
 无声退出兜底补记 blocked（SILENT_SKIP_MARKERS 豁免）、900s 包装超时补记、
 逐域完整日志落 `run/agent_logs/`。
 
+两处兜底补记**都经 `state.upsert_submission` 的迁移守卫**：agent 若已投达
+（pending_review/success/emailed/delivery_ambiguous），这条 blocked 会被拒并打一行
+`[账本] 状态守卫拒绝 …` —— 那种域本来就在终态里不会被重选，绝不能被兜底打回可重投
+（重投 = 重复提交）。**别绕过守卫直接往 state.jsonl 追加行。**
+
 **未包含（私有基建，不带）**：代理节点池轮换（mihomo/Surge，本机 7891/8234）、
 CF 签名站的住宅出口重投与 cloak 指纹内核救援（依赖私有二进制和家庭宽带出口）、
 远程核验模式（VERIFY_JOB）。这些与你的网络环境强绑定，开源版用 `HTTPS_PROXY`
 单代理替代；CF 挑战多的话自己配静态住宅代理。
+
+**mail_sweeper 侧同样有没带过来的东西**（都是 `try/except` 包着的可选依赖，缺了不影响
+主流程，但要知道它们是哑的）：
+
+- `alerts` 模块（告警出口）不在本仓 —— 所以"QQ 信箱本轮读到 0 封"、"收信轮次异常"
+  这些本该升级成告警的事件，开源版只会打进日志。**常驻要长期跑就自己盯日志**，
+  或者补一个 `alerts.py`（需要 `raise_alert(source, level, msg, detail, dedup_key)`
+  和 `resolve(dedup_key, msg)` 两个函数）；
+- `mail_ws` 模块（WebSocket 秒级唤醒）不在本仓 —— 收信延迟退化成周期轮询
+  （空闲 `SWEEP_IDLE_SEC` 默认 900s，有 agent 等信时 `SWEEP_BUSY_SEC` 默认 5s），
+  正确性不受影响；
+- `hook_events_moved()`（webhook 计数兜底）的出站代理走 `WEBHOOK_PROXY` /
+  `HTTPS_PROXY`，没配就直连（原来写死作者本机的 `127.0.0.1:7891`，换机器必然连不上）。
+
+## 规范化配置（LLM 端点）
+
+配置解析收口在 `llm_config.py` / `llm_config.mjs`（**两份规则逐条一致**，25 个用例
+跨语言对拍过，含歧义配置的拒绝行为）。要点：
+
+- **填 base URL 就行**，不用自己拼 `/chat/completions`。根域 / `/v1` / 带尾斜杠 /
+  完整地址 / `/v1beta` / Azure 带 query，六种写法都认；
+- **base 与 key 必须同源**：按"来源单元"整体挑,不按字段各自降级 ——
+  否则会把 A 供应商的 key 发给 B 供应商的地址。单元优先级:
+  `LLM_BASE_URL`+`LLM_API_KEY` > 旧名 `LLM_ENDPOINT`+`LLM_KEY`（仍可用，会提示改名）
+  > `OPENAI_BASE_URL`+`OPENAI_API_KEY` > `llm.json` >
+  `my_site.json` 的 `llm_endpoint`/`llm_key`/`llm_model`（历史遗留，**此前代码从没读过**）。
+  选中第一个带 key 的单元，base 取它自己的；**别的单元指了不同 origin 的 base 就直接报错**，
+  不猜（`LLM_ALLOW_SPLIT_CONFIG=1` 可放行，自担风险）；
+- `python3 llm_config.py` 直接看当前解析结果（key 只显示掩码）；
+- 配置文件路径可用 env 覆盖：`LLM_CONFIG` / `OUTREACH_MY_SITE`。
+
+### 配置界面（`python3 configure.py`）
+
+管 `llm.json` 与 `my_site.json` 两个文件，带「测试连接」实测按钮。**它不在公开站
+`index.html` 里**——那是要发 GitHub Pages 的纯静态页，浏览器写不了本地文件，
+而且在公开域名的页面上放 API key 输入框本身就是坏模式。安全边界（别为省事去掉）：
+只绑 `127.0.0.1`、每次启动生成一次性 token、Host 必须是环回地址（防 DNS 重绑定）、
+Origin 跨源即拒、key 只回掩码、写文件 0600、**保留界面不认识的字段**（比如
+`my_site.json` 里的 agentmail webhook 块）、页面零外部资源（否则 token 随 Referer 外泄）。
+
+### 已知差异：远端端点的代理行为
+
+Python 侧（`mail_sweeper` / `check_llm`）走 urllib，**认 `http_proxy`/`https_proxy`
+环境变量**；Node 侧（`agent_submit`）用内置 fetch，**不认**。所以远端端点在两边的
+出网路径可能不同（国内环境常见）。**本机端点（127.0.0.1/localhost）两边一致**——
+Python 侧显式绕开了代理，否则设了代理的机器上「本机 Ollama/vLLM」必然探测失败
+（代理回 503，错误信息还完全看不出是代理干的）。
+
+要让 Node 侧也走代理得给 undici 配 dispatcher，会引入新依赖，目前没做。
 
 ## 纪律（踩过的坑沉淀）
 
@@ -152,6 +238,9 @@ CF 签名站的住宅出口重投与 cloak 指纹内核救援（依赖私有二�
 - 每域每天最多一次，域间 20-40 秒随机间隔；
 - 只投实证页：清单全部来自"给竞品发过 dofollow"的页面（targets.py）；
 - `delivery_ambiguous` 和 manual 队列在 `human_tasks.jsonl`，人工接活；
+- 单站时间预算 `SUBMIT_MAX_MINUTES`（默认 8，driver 传 10）：看门狗触发点按 driver
+  的 900s 包装硬杀倒推，超过约 12 分钟会被自动钳住（启动日志会说明）——要真跑更久，
+  得连 driver.py 的 `timeout=900` 一起抬，否则 agent 会先被杀、终局落不了账；
 - 提交后 1-4 周盯邮箱：收录审核大多要人工等，验证邮件不点 = 白投
   （`mail_sweeper.py --loop` 常驻自动点）；
 - 别手改 state.jsonl；它是唯一状态源，重跑自动续。

@@ -13,7 +13,7 @@
   "_mailbox": "【必准备】收验证/审核邮件的信箱,两条腿至少通一条(都免费):①agent.qq.com 注册 + npm i -g @tencent-qqmail/agently-cli + auth login(不在本文件配置);②agentmail.to 注册拿 API key + pip install agentmail curl_cffi,填下面 agentmail_* 两个字段。一条腿不通会降级打日志,不影响另一条。mail_sweeper.py 靠它们自动收信点验证链接",
   "agentmail_api_key": "",
   "agentmail_inbox_id": "",
-  "_llm": "【必准备】OpenAI 兼容端点。agent_submit.mjs / mail_sweeper.py 走环境变量 LLM_ENDPOINT/LLM_KEY/LLM_MODEL(降级链 LLM_FALLBACKS);下面的字段是给本仓其它工具用的",
+  "_llm": "【已迁走】LLM 端点现在配在 llm.json(cp llm.example.json llm.json)或环境变量 LLM_BASE_URL/LLM_API_KEY/LLM_MODEL,最省事是跑 python3 configure.py。下面三个字段是历史遗留位置——此前代码从没读过它们,现在 llm_config 会认(优先级最低)并提示你迁走,新配置别再往这里填。",
   "llm_endpoint": "",
   "llm_key": "",
   "llm_model": "",

@@ -22,7 +22,7 @@ python3 -m http.server 8899
 | **总榜** | 15,000+ AI 工具站，月访问量/自然搜索流量/环比增长/反链/全球排名/域名注册时间，点行展开详情抽屉（12 月流量曲线、渠道构成、头部关键词） |
 | **增长榜** | 按流量环比增速排序——谁在起飞一眼可见 |
 | **新品雷达** | 近 90 天新注册的 AI 工具站，按域名注册时间排序 |
-| **外链库** | 12,000 个真实给出过 dofollow 外链的页面；**输入竞品域名，查它全部 dofollow 来源**（已覆盖 1,100+ 站），总榜反链列可下载单域 CSV |
+| **外链库** | 12,000 个真实给出过 dofollow 外链的页面；**输入竞品域名，查它的 dofollow 来源**（已覆盖 1,360 站，每站按权重分取 top 100），总榜反链列可下载单域 CSV |
 
 中英双语（右上角切换）。All views available in English via the toggle.
 
@@ -33,17 +33,17 @@ python3 -m http.server 8899
 ```bash
 cd outreach
 npm install                                                # playwright-core 等
-cp my_site.example.json my_site.json                       # 填站点资料 + AgentMail 收信配置
+python3 configure.py                                       # 本机配置界面:LLM 端点 + 打码/收信 key
 cp kit.example.json kit.json                               # 产品资料包(文案槽位/forbidden_claims)
 cp identities.example.json identities.json                 # 投放 persona
-export LLM_ENDPOINT=... LLM_KEY=... LLM_MODEL=...          # OpenAI 兼容端点(必填,代理决策和邮件理解都靠它)
+python3 check_llm.py                                       # 实测端点(连通性 + json_object)
 python3 targets.py                                         # 生成投放清单
 python3 driver.py --limit 5                                # 小批试跑(先 5 个看状态)
 python3 mail_sweeper.py --loop                             # 常驻:收验证邮件/点验证链接
 node verify_link.mjs --pending --kit kit.json              # 终核:链接真上线才记 success
 ```
 
-开工准备（缺了别跑）：免费 AgentMail 账号（agent.qq.com，收验证邮件）+ `npm i -g @tencent-qqmail/agently-cli` 授权一次；OpenAI 兼容 LLM 端点；persona 身份。详见 `outreach/README.md`。
+开工准备（缺了别跑）：免费 AgentMail 账号（agent.qq.com，收验证邮件）+ `npm i -g @tencent-qqmail/agently-cli` 授权一次；OpenAI 兼容 LLM 端点（`python3 configure.py` 有界面，填 base URL 即可，**模型须支持 `response_format: json_object`**）；persona 身份。详见 `outreach/README.md`。
 
 三条红线由代码硬执行，LLM 无权越过：付费站即停 / 文案过 forbidden_claims 闸门 / 验证码不让 LLM 编答案（无 capsolver key 进人工队列）。单次核验不判死——终核连续 3 次 offline 才算掉链。
 
@@ -51,8 +51,11 @@ node verify_link.mjs --pending --kit kit.json              # 终核:链接真上
 
 - 流量/排名/渠道数据为第三方流量估算服务的估计值（SimilarWeb 口径），仅供研究参考
 - 反链明细来自 Semrush 口径的 dofollow 索引快照（2026-08）
+- **单域明细是 top 100，不是全量**：`data/links/<domain>.json` 每站按权重分（ascore）
+  降序截前 100 条（1,360 站共 13.5 万行），下载的 CSV 同此口径。要全量得自己接数据源
 - 数据快照日期见页面数据；本项目**只含数据快照**，采集管道依赖私有账号体系，未包含在本仓库
-- `scripts/` 里的构建脚本展示了数据如何聚合（供参考/复刻），需要自己的数据源才能跑
+- `scripts/` 里的构建脚本展示了数据如何聚合（供参考/复刻），需要自己的数据源才能跑；
+  脚本里的输入/输出路径是作者本机的绝对路径，复刻时先改 `DATA` / `SITE` / `OUT`
 
 ## 目录结构 · Layout
 
