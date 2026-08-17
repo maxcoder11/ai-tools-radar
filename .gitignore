@@ -3,6 +3,9 @@
 __pycache__/
 node_modules/
 outreach/my_site.json
+outreach/llm.json
+outreach/*.tmp.*
+outreach/*.lock
 outreach/state.jsonl
 outreach/worklist.jsonl
 outreach/kit.json
