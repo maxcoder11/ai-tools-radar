@@ -233,8 +233,12 @@ const PREFILTER_BUDGET_MS = +(process.env.VERIFY_PREFILTER_BUDGET_MS || 40000);
 const PREFILTER_TIMEOUT_MS = 6000;
 
 async function mapLimit(items, limit, fn) {
+  // 【修】NaN → Math.min(NaN,n)=NaN → Array.from({length:NaN}) 是空数组 → **0 个 worker,
+  // 所有候选被静默丢弃**;Infinity → 恢复 120 并发。env 配错不能变成静默错误。
+  const n = Number(limit);
+  const safe = Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 32) : 6;
   const it = items[Symbol.iterator]();
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+  const workers = Array.from({ length: Math.max(1, Math.min(safe, items.length)) }, async () => {
     for (;;) {
       const { value, done } = it.next();
       if (done) return;
@@ -244,12 +248,14 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(workers);
 }
 
-async function cheapPrefilter(urls, prod, limit = 8) {
+async function cheapPrefilter(urls, prod, limit = 8, deadlineAt = null) {
   const keep = [];   // 高优先:静态 HTML 里已经出现产品名
   const maybe = [];  // 低优先:排除不掉,需要渲染
   let resolved = 0;  // 拿到明确 HTTP 结论的次数 —— 用于证明"确实看过",不是没连上
   let skipped = 0;   // 超预算没来得及探的
-  const deadline = Date.now() + PREFILTER_BUDGET_MS;
+  // 【修】原来每次调用各自重置预算 —— path_guess 与 site_search 两轮就是 2×40s。
+  // 改成整域共享一个截止时刻(调用方传入)。
+  const deadline = deadlineAt || (Date.now() + PREFILTER_BUDGET_MS);
   await mapLimit(urls, PREFILTER_CONCURRENCY, async (u) => {
     if (Date.now() > deadline) { maybe.push(u); skipped++; return; }  // 预算到点:不敢排除
     let r;
@@ -257,9 +263,9 @@ async function cheapPrefilter(urls, prod, limit = 8) {
     catch { maybe.push(u); return; }              // 网络异常 → 不敢排除
     // 【修】被挡的不计 resolved:resolved 喂给"证据是否充分"的门槛,
     // 而 403/429 恰恰说明我们没看到内容。原来它先 resolved++ 再判,等于把限流当证据。
-    if (r.status >= 500 || r.status === 403 || r.status === 429) { maybe.push(u); return; }
+    if (r.status >= 400 && r.status !== 404 && r.status !== 410) { maybe.push(u); return; }
     resolved++;
-    if ([404, 410, 451, 400].includes(r.status)) return;   // 明确不存在 → 丢
+    if (r.status === 404 || r.status === 410) return;      // 站方明说没有这个资源 → 丢
     const body = r.text || '';
     if (body.toLowerCase().includes(prod.slug)) { keep.push(u); return; }
     // 静态 HTML 里没有产品名:是 SPA 壳子就留给渲染,是实打实的完整页面就丢
@@ -287,10 +293,12 @@ async function inspect(pg, url, prod) {
   // 一个对所有路径回 403 的 WAF(或 429 限流)于是同时满足"看过页面"和"探到明确结论",
   // 直接把域推向 offline_confirmed → 三次 → failed。**拿不到内容 ≠ 页面不存在**:
   // 403/429/5xx 是"我们被挡在外面",只有 404/410 才是站方说"没有这个页"。
-  if (status === 403 || status === 429 || status >= 500) {
-    return { status, xrobots, blocked: true };
-  }
-  if (status >= 400) return { status, xrobots, notFound: true };
+  // 【二修】上一版写的是"403/429/5xx 算 blocked,其余 >=400 算 notFound",但注释声称
+  // "只有 404/410 才是不在" —— 实现与注释不符:401(要登录)、400、408、451 全被当成
+  // "页面不存在",120 个 401 的桩测最终得到 offline_confirmed,三次就把正常域写成 failed。
+  // 现在**按白名单**:只有站方明说"没有这个资源"的才算不在,其余一律"我们没看着"。
+  if (status === 404 || status === 410) return { status, xrobots, notFound: true };
+  if (status >= 400) return { status, xrobots, blocked: true };
 
   const scan = () => pg.evaluate((host) => {
     // 本函数序列化进浏览器执行,必须自包含,不能引模块
@@ -387,7 +395,8 @@ async function verifyDomain(pg, dom, prod) {
   let networkErrors = 0;
   let sitemapsRead = 0;
   let probedPages = 0;   // 拿到明确 HTTP 结论的页面数(渲染的 + 预筛的)
-  let blockedPages = 0;  // 被 403/429/5xx 挡回的页面数 —— 不算证据,只用于解释判不了
+  let blockedPages = 0;  // 被挡回(非 404/410)的页面数 —— 不算证据,只用于解释判不了
+  const prefilterDeadline = Date.now() + PREFILTER_BUDGET_MS;   // 整域共享,不是每轮重置
 
   // 候选 URL 按探针优先级排队
   const plans = [];
@@ -412,7 +421,7 @@ async function verifyDomain(pg, dom, prod) {
     let urls = urls0;
     if (oracle === 'path_guess' || oracle === 'site_search') {
       try {
-        const pf = await cheapPrefilter(urls0, prod);
+        const pf = await cheapPrefilter(urls0, prod, 8, prefilterDeadline);
         urls = pf.urls;
         if (pf.resolved > 0) probedPages += pf.resolved; // 预筛拿到明确 404 也算"看过"
       } catch { urls = urls0.slice(0, 6); networkErrors++; }
@@ -504,9 +513,16 @@ async function verifyDomain(pg, dom, prod) {
 
   // 没找到 —— 严格区分"确实没有"和"根本没看着"。判死的门槛必须高于判活。
   if (!sawAnyPage && probedPages === 0) {
-    return { result: 'unknown_network', oracles_tried: tried.join(','),
-             error: `全部候选页不可达(网络错误 ${networkErrors} 次)`,
-             evidence: { sitemaps_read: sitemapsRead, probed_pages: 0 } };
+    // 【修】全被 403/401 挡回时,原来一律报 unknown_network 且写"网络错误 0 次" ——
+    // 归因错了:那是被封,不是网络不通。两种情况分开说,便于人判断要不要换出口。
+    const isBlocked = blockedPages > 0 && blockedPages >= networkErrors;
+    return { result: isBlocked ? 'unknown_blocked' : 'unknown_network',
+             oracles_tried: tried.join(','),
+             error: isBlocked
+               ? `全部候选页被挡回(${blockedPages} 页 4xx/5xx,非 404/410),疑似 WAF/限流/需登录`
+               : `全部候选页不可达(网络错误 ${networkErrors} 次)`,
+             evidence: { sitemaps_read: sitemapsRead, probed_pages: 0,
+                         blocked_pages: blockedPages, network_errors: networkErrors } };
   }
   // offline_confirmed 的门槛:sitemap 可读(能拿到站方的全量 URL 清单),
   // 或者至少探到过 10 个明确 HTTP 结论的页面。达不到就是 unknown_blocked,不判死。

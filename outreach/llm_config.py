@@ -153,10 +153,30 @@ def _units():
     ]
 
 
-def _origin(u):
+DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin_of(u):
+    """(scheme, host, port) —— **必须与 llm_config.mjs 的 originOf 逐字符同结果**。
+    这是同源绑定的判据本身:两边归一化不一致 = 一种语言拒绝、另一种放行。
+    统一口径:scheme/host 小写、默认端口显式补齐、IPv6 去方括号。
+    (WHATWG URL 会自动做前两条,Python 的 urlparse 不会 —— 之前 py 用 netloc、
+     js 用 host,`API.x.com` 与 `x.com:443` 在两边判定相反。)"""
     from urllib.parse import urlparse
     p = urlparse(chat_url(u))
-    return (p.scheme, p.netloc)
+    scheme = (p.scheme or "").lower()
+    try:
+        host = (p.hostname or "").lower().strip("[]")
+    except ValueError:                       # 畸形 netloc
+        host = (p.netloc or "").lower()
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    return (scheme, host, port or DEFAULT_PORTS.get(scheme, 0))
+
+
+_origin = origin_of                          # 兼容旧调用名
 
 
 def load():
@@ -168,7 +188,9 @@ def load():
     """
     units = _units()
     warnings, sources = [], {}
-    allow_split = bool(_env("LLM_ALLOW_SPLIT_CONFIG"))
+    # 【修】原来 bool(非空串) —— "0"/"false"/"no" 全都会开启这个放行开关(它放行的是
+    # "key 发给另一个供应商"),等于把安全阀拧成了摆设。按真布尔解析。
+    allow_split = _env("LLM_ALLOW_SPLIT_CONFIG").lower() in ("1", "true", "yes", "on")
 
     winner = next((u for u in units if u["key"]), None)
     if winner is None:
@@ -197,10 +219,14 @@ def load():
                        f"确实要这么配就设 LLM_ALLOW_SPLIT_CONFIG=1。")
                 if not allow_split:
                     raise RuntimeError(msg)
-                warnings.append("已放行 split 配置(LLM_ALLOW_SPLIT_CONFIG=1):"
-                                f"key 来自 {winner['name']},地址来自 {u['name']} —— key 会发给后者")
-                base = u["base"]
-                sources["base"] = u["name"]
+                # 【修】原来这里把 base 反向覆盖成**低优先级单元**的地址 ——
+                # 一份完整的高优先级配置(LLM_BASE_URL+LLM_API_KEY)会被 llm.json 的
+                # base 顶掉,key 反而更容易发错地方。放行只该是"别报错",不该改选择:
+                # 仍用 winner 自己的 base,只是把冲突如实说出来。
+                warnings.append(
+                    f"⚠️ LLM_ALLOW_SPLIT_CONFIG 已放行歧义配置:key 来自 {winner['name']},"
+                    f"仍发往它自己的地址 {chat_url(base)};{u['name']} 指定的 "
+                    f"{chat_url(u['base'])} 被忽略")
                 break
 
     for u in units:

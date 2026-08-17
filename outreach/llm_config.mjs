@@ -83,10 +83,20 @@ function units() {
   ];
 }
 
-function origin(u) {
-  try { const p = new URL(chatUrl(u)); return p.protocol + '//' + p.host; }
-  catch { return String(u); }
+const DEFAULT_PORTS = { 'http:': 80, 'https:': 443 };
+
+/** (scheme, host, port) —— **必须与 llm_config.py 的 origin_of 逐字符同结果**。
+ *  见 .py 同名函数的注释:两边归一化不一致 = 一种语言拒绝、另一种放行。 */
+export function originOf(u) {
+  try {
+    const p = new URL(chatUrl(u));
+    const scheme = p.protocol.replace(/:$/, '').toLowerCase();
+    const host = p.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    const port = p.port ? Number(p.port) : (DEFAULT_PORTS[p.protocol] || 0);
+    return `${scheme}|${host}|${port}`;
+  } catch { return `?|${String(u).toLowerCase()}|0`; }
 }
+const origin = originOf;
 
 /** @returns {{url,base_url,key,models,sources,warnings}} 不校验连通性(那是 check_llm.py 的活)
  *  **base 与 key 同源绑定**:选第一个带 key 的单元,base 取它自己的;别的单元若指了
@@ -94,7 +104,8 @@ function origin(u) {
 export function load() {
   const us = units();
   const warnings = [], sources = {};
-  const allowSplit = !!env('LLM_ALLOW_SPLIT_CONFIG');
+  // 【修】原来 !!非空串 —— "0"/"false" 也会开启这个放行开关。按真布尔解析(与 .py 同)。
+  const allowSplit = ['1', 'true', 'yes', 'on'].includes(env('LLM_ALLOW_SPLIT_CONFIG').toLowerCase());
 
   const winner = us.find(u => u.key) || null;
   let base, key;
@@ -120,9 +131,9 @@ export function load() {
           + `别一半在 env 一半在文件 —— 否则会把一个供应商的 key 发给另一个供应商。\n`
           + `确实要这么配就设 LLM_ALLOW_SPLIT_CONFIG=1。`;
         if (!allowSplit) throw new Error(msg);
-        warnings.push(`已放行 split 配置(LLM_ALLOW_SPLIT_CONFIG=1):key 来自 ${winner.name},`
-          + `地址来自 ${u.name} —— key 会发给后者`);
-        base = u.base; sources.base = u.name;
+        // 【修】放行只该是"别报错",不该反向把 base 覆盖成低优先级单元的地址(与 .py 同)。
+        warnings.push(`⚠️ LLM_ALLOW_SPLIT_CONFIG 已放行歧义配置:key 来自 ${winner.name},`
+          + `仍发往它自己的地址 ${chatUrl(base)};${u.name} 指定的 ${chatUrl(u.base)} 被忽略`);
         break;
       }
     }

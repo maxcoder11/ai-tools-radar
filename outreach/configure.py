@@ -86,11 +86,9 @@ def _write(path, obj):
 
 
 def _origin(u):
-    """scheme+host+port。**只比 netloc 会放过 https→http 降级**(Codex P1):
-    保存的是 https://api.x.com,拿 http://api.x.com 去测就会明文发出已存的 key。"""
-    from urllib.parse import urlparse
-    p = urlparse(llm_config.chat_url(u))
-    return (p.scheme, p.hostname, p.port or (443 if p.scheme == "https" else 80))
+    """复用 llm_config.origin_of —— 同源判定全仓只能有一份实现,
+    否则 configure 与 llm_config 会对同一组配置给出相反结论。"""
+    return llm_config.origin_of(u)
 
 
 def _keep(old, new_val):
@@ -135,8 +133,14 @@ def save(body):
         # 原样留给新地址 —— 下一次请求就把 A 的 key 发给 B(Codex P1)。
         new_base = (body.get("base_url") or "").strip()
         typed = (body.get("api_key") or "").strip()
-        old_base = str(cur.get("api_key") and cur.get("base_url") or "").strip()
-        if old_base and new_base and not typed and _origin(new_base) != _origin(old_base):
+        # 【二修】base_url 留空曾能绕过这道闸:`and new_base` 直接短路 → 不拦 → 写进空
+        # base → load() 回落到默认 OpenAI,把上一个供应商的 key 发过去(两个方向都复现过)。
+        # 现在:空 base 直接拒(它本来就不是合法配置),再比 origin。
+        if not new_base:
+            return {"ok": False, "error": "Base URL 不能为空 —— 留空会回落到默认 OpenAI 地址,"
+                                          "把已保存的 key 发过去。填供应商文档给的 base URL。"}
+        old_base = str(cur.get("base_url") or "").strip() if str(cur.get("api_key") or "").strip() else ""
+        if old_base and not typed and _origin(new_base) != _origin(old_base):
             return {"ok": False, "error":
                     f"换了 endpoint({_origin(old_base)[1]} → {_origin(new_base)[1]})就必须重填 API Key。"
                     f"留空 = 沿用旧 key,那会把上一个供应商的 key 发给新地址。"}
@@ -293,6 +297,14 @@ $('preset').onchange = () => { const p = PRESETS[+$('preset').value];
   if (p[1]) $('base_url').value = p[1]; if (p[2]) $('model').value = p[2]; };
 
 function render(s){
+  // 【修】初始配置有错时 /api/state 返回 {error},原来直接解引用 s.llm → TypeError → 白屏,
+  // 用户看不到任何修复指引。先把错误显示出来。
+  if (!s || s.error || !s.llm) {
+    $('envwarn').style.display = 'block';
+    $('envwarn').textContent = '读取当前配置失败:' + ((s && s.error) || '未知错误')
+      + '\n先修好配置文件(或删掉它改用环境变量),再刷新本页。';
+    return;
+  }
   $('base_url').value = s.llm.base_url; $('model').value = s.llm.model;
   // 预设下拉跟当前值对齐:对不上任何预设就落到「自定义」,别显示一个骗人的服务商名
   const hit = PRESETS.findIndex(p => p[1] && p[1] === s.llm.base_url);

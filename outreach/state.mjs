@@ -13,6 +13,7 @@
 //   constraints.jsonl  站点约束(带 TTL),activeConstraints 折叠后过滤过期
 //   human_tasks.jsonl  人工任务(append 事件流,读取时折叠 pending/done)
 //   recipes.json       站点 recipe 缓存(成功打法沉淀,原子写)
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,10 +149,20 @@ export function upsertSubmission({
   if (!STATUSES.has(status)) throw new Error(`state: 未知 status: ${status}`);
   const ev = clean(evidence, 2000);
   const nt = clean(note, 600);
-  const cur = currentStatus(dom);
-  const from = cur ? cur.status : null;
+  // 【修】"读当前态 → 判守卫 → 追加"必须整段在锁内。原来只有 claimDelivery 加了锁,
+  // 而 upsertSubmission 不加 —— 两者写的是**同一个投影**(最后一行为准),一次交错就能
+  // 让 blocked 落在 delivery_ambiguous 之后,守卫看不见、认领态被顶掉,下次 claimDelivery
+  // 又返回 claimed=true → 重复 POST(Codex 复现的 ambiguous→blocked→ambiguous 序列)。
+  const guard = withFileLock(STATE_FILE, () => {
+    const cur = currentStatus(dom);
+    const f = cur ? cur.status : null;
+    if (blocksTransition(f, status, force, reason_code)) return { from: f, blocked: true };
+    append(STATE_FILE, { src: dom, status, note: nt || '', evidence: ev, ts: nowUtc() });
+    return { from: f, blocked: false };
+  });
+  const from = guard.from;
 
-  if (blocksTransition(from, status, force, reason_code)) {
+  if (guard.blocked) {
     recordEvent({
       domain: dom, event_type: 'note', prev_status: from, status: from,
       reason_code: 'local_error', source,
@@ -160,7 +171,6 @@ export function upsertSubmission({
     return { written: false, from, to: from, blockedRegression: true };
   }
 
-  append(STATE_FILE, { src: dom, status, note: nt || '', evidence: ev, ts: nowUtc() });
   recordEvent({
     domain: dom,
     event_type: from === status ? 'attempt_end' : 'status_change',
@@ -285,7 +295,12 @@ export function spentToday(provider) {
     throw new Error(`成本账本读取失败(${String(e.message).slice(0, 60)}),fail-closed`);
   }
   const today = nowUtc().slice(0, 10);
-  const lines = raw.split('\n').filter(Boolean);
+  // 【二修】原来 split+filter(Boolean) 会把结尾换行产生的空元素滤掉,于是一条
+  // **完整的坏行**(末尾带 \n)也成了"最后一行",被当成 append 半截写入放过。
+  // 现在只有"文件不以换行结尾"时,最后一行才可能是半截。
+  const endsClean = raw.endsWith('\n');
+  const lines = raw.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
   let sum = 0;
   for (let i = 0; i < lines.length; i++) {
     let r;
@@ -294,10 +309,14 @@ export function spentToday(provider) {
       // 【修】原来坏行直接跳过、非法金额 `|| 0` 吞掉 —— 账本损坏时**少算花销**,
       // 熔断照样放行,fail-closed 又一次名存实亡。少算 = 多花钱,必须抛。
       // 例外:只有最后一行可以是写到一半的半截行(append 的固有竞态),跳过它。
-      if (i === lines.length - 1) continue;
+      if (!endsClean && i === lines.length - 1) continue;
       throw new Error(`成本账本第 ${i + 1} 行损坏(非最后一行,不是写入竞态),fail-closed`);
     }
     if (!r || r.provider !== provider || !String(r.ts || '').startsWith(today)) continue;
+    // null/undefined/缺字段 → Number() 给 0 或 NaN,原来 null 就这么静默按 0 计
+    if (r.amount_usd === null || r.amount_usd === undefined) {
+      throw new Error(`成本账本第 ${i + 1} 行缺 amount_usd,fail-closed`);
+    }
     const amt = Number(r.amount_usd);
     if (!Number.isFinite(amt) || amt < 0) {
       throw new Error(`成本账本第 ${i + 1} 行金额非法(${JSON.stringify(r.amount_usd)}),fail-closed`);
@@ -362,22 +381,39 @@ export function saveRecipe(domain, recipe, status, notes) {
 /** 排他锁(O_EXCL + 陈旧接管),语义与 creds.mjs 的 acquire/release 一致。
  *  用在两处:saveRecipe 的整文件覆写、claimDelivery 的"查当前态→追加认领行"。
  *  后者是防重复投递的核心闸,查与写必须原子。函数声明有提升,调用点在定义之前无碍。 */
-function withFileLock(target, fn, waitMs = 8000) {
+export function withFileLock(target, fn, waitMs = 8000) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });   // 【修】新 DIR 首次用会 ENOENT
   const lock = `${target}.lock`;
   const t0 = Date.now();
   for (;;) {
+    let token;
     try {
+      token = `${process.pid}-${crypto.randomUUID()}`;
       const fd = fs.openSync(lock, 'wx');       // O_CREAT|O_EXCL
-      fs.writeSync(fd, `${process.pid} ${nowUtc()}\n`);
+      fs.writeSync(fd, `${token} ${nowUtc()}\n`);
       fs.closeSync(fd);
-      try { return fn(); } finally { try { fs.unlinkSync(lock); } catch {} }
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      try {                                      // 陈旧锁(持锁进程已死)接管
-        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) { fs.unlinkSync(lock); continue; }
-      } catch { continue; }
-      if (Date.now() - t0 > waitMs) throw new Error(`recipe 锁等待超时:${lock}`);
+      // 【修】陈旧接管原来是直接 unlink:两个等待者可能都判超时、都 unlink、都拿到锁。
+      // 照 creds.mjs 的手法 —— rename 成只有自己知道的名字,**改名成功的那个才算抢到**,
+      // 由它删掉墓碑;抢输的回到循环重试。
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) {
+          const grave = `${lock}.stale.${crypto.randomUUID()}`;
+          try { fs.renameSync(lock, grave); fs.unlinkSync(grave); } catch { /* 抢输 */ }
+          continue;
+        }
+      } catch { continue; }                      // 锁刚被释放,下轮就能抢到
+      if (Date.now() - t0 > waitMs) throw new Error(`账本锁等待超时(${waitMs}ms):${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      continue;
+    }
+    try { return fn(); }
+    finally {
+      // 只删仍然是自己的那把锁(被陈旧接管抢走后就别乱删别人的)
+      try {
+        if (fs.readFileSync(lock, 'utf8').split(' ')[0] === token) fs.unlinkSync(lock);
+      } catch {}
     }
   }
 }

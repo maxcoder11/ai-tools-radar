@@ -33,9 +33,13 @@ from datetime import datetime, timedelta, timezone
 # 同目录 dbwpy.py 兼容层落到 state.jsonl —— 调用点(dbwpy.*/v2_conn().execute)
 # 一行未改,双库语义在单账本里合并(单产品)。
 _REPO = os.path.dirname(os.path.abspath(__file__))   # outreach/ 目录
-CREDS_JSON = os.path.join(_REPO, "my_site.json")  # agentmail_api_key/agentmail_inbox_id(env 可覆盖)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dbwpy  # noqa  # 兼容层,不是私仓那个 dbwpy
+import llm_config  # noqa: E402  LLM 端点/key 与配置文件路径的唯一解析口
+
+# 【修】原来硬拼默认路径,无视 OUTREACH_MY_SITE —— configure.py 按 env 写到别处,
+# 界面显示"已保存"而 sweeper 这边读的还是默认文件,收信端看不到。统一走 llm_config。
+CREDS_JSON = llm_config.MY_SITE  # agentmail_api_key/agentmail_inbox_id(OUTREACH_MY_SITE 可覆盖)
 
 STATE = os.path.join(_REPO, "run", "_sweeper_state.json")
 LOG = os.path.join(_REPO, "run", "_sweeper.log")
@@ -62,11 +66,10 @@ LINK_RE = re.compile(r"https?://[^\s\"')\]>]+")
 # 【开源移植】端点/模型/key 统一走 llm_config(base URL 与完整地址都收,env 与
 # llm.json 都读;规则见 llm_config.py 文件头,与 JS 侧 llm_config.mjs 逐条一致)。
 # 调用逻辑不动:CCPA / LLM_MODELS / ccpa_key() 三个名字对下游保持原样。
-import llm_config  # noqa: E402
+# 端点/模型/key **一次性同时冻结**:三者必须来自同一时刻的同一份配置(见 ccpa_key)
 _LLM = llm_config.load()
 CCPA = _LLM["url"]
 LLM_MODELS = _LLM["models"]
-_KEY = None
 DRY_RUN = False
 
 MAIL_SYS = """你是外链投放系统的邮件理解员。下面是某封邮件的信息(发件人/主题/正文片段)。
@@ -229,12 +232,13 @@ def save_state(s):
 
 
 def ccpa_key():
-    # 【开源移植】key 走 llm_config 的统一解析口(env 或 llm.json),不碰私有网关配置
-    global _KEY
-    if _KEY:
-        return _KEY
-    _KEY = llm_config.require_llm("mail_sweeper")["key"]
-    return _KEY
+    # 【开源移植】key 走 llm_config 的统一解析口(env 或 llm.json),不碰私有网关配置。
+    # 【修】原来这里首次请求时**重新 load()** —— 而 CCPA/LLM_MODELS 是模块加载时冻结的,
+    # 常驻运行中改配置(A→B)就会把 B 的 key 发给 A 的 endpoint。
+    # agent_submit.mjs 修过同一个坑,这边没跟上。现在只用启动那一刻的 _LLM,同源同时刻。
+    if not _LLM["key"]:
+        llm_config.require_llm("mail_sweeper")   # 只为抛出带指引的错误
+    return _LLM["key"]
 
 
 def _llm_once(model, messages):
@@ -483,8 +487,8 @@ def park_retry():
                 continue
         if time.time() - x["ts"] > PARK_TTL:
             if site in KNOWN:
-                # 【修】库内站却 2 小时都没处理成(handle 一直返回 False):这不是
-                # "非库内",是卡住了。静默丢 = 验证信永久消失。转人工,别无声吞掉。
+                # 库内站却 2 小时都没处理成(handle 一直返回 False):这不是"非库内",
+                # 是卡住了。静默丢 = 验证信永久消失。转人工,别无声吞掉。
                 log(f"  ⚠️ {x['site']} 是库内站但挂起超 2h 仍未处理成,转人工(不丢件)")
                 try:
                     _queue_human(None, site,
@@ -492,7 +496,11 @@ def park_retry():
                                  f"(mid={x['mid']}),请人工看这封信",
                                  blocker="park_stuck")
                 except Exception as e:
-                    log(f"  转人工失败(该信仍会丢):{e}")
+                    # 【二修】原来入队失败照样 continue —— 磁盘/权限异常时信仍然丢了,
+                    # 而"转人工"是这条路径唯一的兜底。入不了队就**留在挂起表里**,
+                    # 下轮再试;宁可让表长一点,也不能无声吞掉一封验证信。
+                    log(f"  ⚠️ 转人工失败({type(e).__name__}: {str(e)[:60]}),该信留在挂起表下轮重试")
+                    keep.append(x)
             else:
                 log(f"  {x['site']} 挂起超 2h 未见账,按非库内落定")
             continue

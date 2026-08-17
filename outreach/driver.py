@@ -95,16 +95,28 @@ class BudgetStop(Exception):
 
 
 def load_state():
-    """src → 最后一行(state.jsonl 是追加日志,后者盖前者)。"""
-    st = {}
+    """src → 最后一行(state.jsonl 是追加日志,后者盖前者)。
+
+    【修】键**同时按原样和 canon 各存一份**。查询侧已经统一 canon,但**历史行不会
+    自动迁移** —— 升级前由老 driver 写下的 `www.Example.com` 行,用 canon 键
+    `example.com` 去查会漏掉,于是一个已经 success 的域被当成没投过、重新投递。
+    两种键都建索引,新旧账本都认得;canon 行优先(它才是写入端现在的口径)。
+    """
+    raw, canon = {}, {}
     if STATE.exists():
         for line in open(STATE):
             try:
                 r = json.loads(line)
-                st[r["src"]] = r
             except Exception:
-                pass
-    return st
+                continue
+            src = r.get("src")
+            if not src:
+                continue
+            raw[src] = r
+            canon[_key(src)] = r
+    merged = dict(raw)
+    merged.update(canon)        # 同一 canon 键上,canon 侧(新写入口径)说了算
+    return merged
 
 
 def save_state(src, status, note=""):

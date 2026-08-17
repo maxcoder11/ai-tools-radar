@@ -10,10 +10,12 @@ node 侧(agent_submit.mjs)与 python 侧(mail_sweeper.py)共享这些文件:
 状态枚举与迁移守卫(DELIVERED 不许被打回 blocked/failed 等)与生产 dbw.js 逐条对齐,
 口径见 state.mjs 文件头注释。所有写都是 append(O_APPEND 小写原子),读整文件折叠。
 """
+import errno
 import json
 import os
 import re
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIR = os.environ.get("OUTREACH_STATE_DIR", HERE)
@@ -62,6 +64,54 @@ def _clean(v, mx=2000):
     if v is None:
         return None
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", str(v))[:mx]
+
+
+LOCK_STALE_SEC = 30
+LOCK_WAIT_SEC = 8
+
+
+def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
+    """跨进程排他锁。**与 state.mjs 的 withFileLock 同一把锁文件、同一套语义** ——
+    Node 侧(agent_submit/verify_link)和 Python 侧(mail_sweeper/driver)写的是同一个
+    投影,只有一边加锁等于没加。锁名 `<target>.lock`,O_EXCL 创建;陈旧锁用
+    "rename 成随机名、改名成功者才算抢到"的方式接管(直接 unlink 会让两个等待者都拿到锁)。
+    """
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    lock = target + ".lock"
+    t0 = time.time()
+    while True:
+        token = f"{os.getpid()}-{uuid.uuid4()}"
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, f"{token} {now_utc()}\n".encode())
+            os.close(fd)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+            try:
+                if time.time() - os.stat(lock).st_mtime > LOCK_STALE_SEC:
+                    grave = f"{lock}.stale.{uuid.uuid4()}"
+                    try:
+                        os.rename(lock, grave)      # 改名成功的那个才有权删
+                        os.unlink(grave)
+                    except OSError:
+                        pass                        # 抢输,回到循环
+                    continue
+            except FileNotFoundError:
+                continue                            # 刚被释放,下轮抢
+            if time.time() - t0 > wait_sec:
+                raise RuntimeError(f"账本锁等待超时({wait_sec}s):{lock}")
+            time.sleep(0.05)
+            continue
+        try:
+            return fn()
+        finally:
+            try:
+                with open(lock) as f:
+                    if f.read().split(" ")[0] == token:
+                        os.unlink(lock)
+            except Exception:
+                pass
 
 
 def _append(file, obj):
@@ -135,15 +185,25 @@ def upsert_submission(domain, status, evidence="", note="",
     if status not in STATUSES:
         raise ValueError(f"state: 未知 status: {status}")
     ev, nt = _clean(evidence, 2000), _clean(note, 600)
-    cur = current_status(dom)
-    frm = cur["status"] if cur else None
-    if _blocks_transition(frm, status, force, reason_code):
+
+    # 【修】"读当前态 → 判守卫 → 追加"整段必须在锁内,且与 Node 侧共用同一把锁。
+    # 不加锁的写会插到 claimDelivery 落的 delivery_ambiguous 之后把它顶掉,
+    # 于是下一次认领又返回 claimed=true → 重复投递。
+    def _txn():
+        cur = current_status(dom)
+        frm_ = cur["status"] if cur else None
+        if _blocks_transition(frm_, status, force, reason_code):
+            return frm_, True
+        _append(STATE_FILE, {"src": dom, "status": status, "note": nt or "",
+                             "evidence": ev, "ts": now_utc()})
+        return frm_, False
+
+    frm, blocked = with_file_lock(STATE_FILE, _txn)
+    if blocked:
         record_event(dom, "note", prev_status=frm, status=frm,
                      reason_code="local_error", source=source,
                      evidence={"rejected_transition": f"{frm} -> {status}", "detail": ev})
         return {"written": False, "from": frm, "to": frm, "blockedRegression": True}
-    _append(STATE_FILE, {"src": dom, "status": status, "note": nt or "",
-                         "evidence": ev, "ts": now_utc()})
     record_event(dom, "attempt_end" if frm == status else "status_change",
                  prev_status=frm, status=status, reason_code=reason_code,
                  source=source, evidence={"evidence": ev, "note": nt})

@@ -2553,8 +2553,15 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       console.error(`[${dom}] LEDGER_WRITE_FAILED 终局写账失败(表单可能已投达),不写 blocked,域留池,exit 43`);
       process.exitCode = 43;
     } else if (e && e.noSolver) {
-      // 有验证码但没配打码 key:终态 manual(人工队列已入),不烧步数不硬刚,
-      // driver 视 manual 为终态不再自动重投。
+      // 有验证码但没有可用 solver:终态 manual,不烧步数不硬刚,driver 视 manual 为终态。
+      // 【修】原注释说"人工队列已入" —— 只有 `!cs.hasKey()` 那几个分支入过队。
+      // 只配 2Captcha 却撞上 CapSolver 独有任务(整页 CF 挑战)时,noSolver 从
+      // solveWithFallback 抛出,人工队列是空的 → 状态 manual 但没人知道要去做。
+      // 这里补一次幂等入队(humanTaskAdd 同域同 blocker 折叠,重复调用无害)。
+      try {
+        queueForHuman(dom, 'captcha_manual',
+          `${String(e.message).slice(0, 120)} —— 请在 ${dom} 页面里人工过验证码再提交(字段已预填)`);
+      } catch (qe) { console.log(`[${dom}] 人工入队失败:${String(qe.message).slice(0, 60)}`); }
       try {
         upsert(dom, 'manual', `${String(e.message).slice(0, 120)}:已转人工队列(human_tasks.jsonl)`);
       } catch (ue) { if (ue && ue.ledger) throw ue; }
