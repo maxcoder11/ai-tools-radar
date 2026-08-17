@@ -21,8 +21,16 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const API = 'https://api.capsolver.com';
 
+function mySitePath() {
+  const v = String(process.env.OUTREACH_MY_SITE || '').trim();
+  if (!v) return path.join(HERE, 'my_site.json');
+  return path.isAbsolute(v) ? v : path.join(HERE, v);
+}
+
 function siteCfg() {
-  try { return JSON.parse(fs.readFileSync(process.env.OUTREACH_MY_SITE || path.join(HERE, 'my_site.json'), 'utf8')); }
+  // 【修】相对 OUTREACH_MY_SITE 原来按 cwd 解析,而 llm_config 锚到 outreach/ ——
+  // 同一份配置两边可能读到不同文件(漏读 solver key,或读到另一份凭据)。同口径。
+  try { return JSON.parse(fs.readFileSync(mySitePath(), 'utf8')); }
   catch { return {}; }
 }
 
@@ -291,7 +299,12 @@ async function solveWithFallback(payload, timeoutMs = 120000, meta = {}) {
     // 【修】没配 capsolver 但配了 2Captcha:直接走降级腿,别拿"缺 capsolver_key"
     // 当终态错误上抛(那样 2Captcha 这条腿永远用不上)。
     if (!has2c()) throw new Error('my_site.json 既没有 capsolver_key 也没有 twocaptcha_key');
+    // 【修】这是个**占位**错误(其实没出错,只是没配 capsolver),原来它没有任何分类标志,
+    // 而下面 2Captcha 真出错时只把 infra/budget 复制过来 —— 无效 key 之类的供应商故障
+    // 于是 terminal/infra/budget/noSolver 全 false,顶层走通用异常把**目标站**烧成 blocked。
+    // 打上 placeholder 标记,下面据此改用 2Captcha 自己的错误对象。
     csErr = new Error('未配 capsolver_key,直接走 2Captcha');
+    csErr.placeholder = true;
   }
   const t2 = to2CaptchaTask(payload);
   if (!t2) {
@@ -312,6 +325,13 @@ async function solveWithFallback(payload, timeoutMs = 120000, meta = {}) {
     console.warn(`[capsolver] 2Captcha 解出 ${t2.type} task=${taskId}`);
     return { solution, provider: 'twocaptcha' };
   } catch (e2) {
+    // 【修】csErr 是占位(压根没试过 capsolver)时,把它当"原始错误"上抛毫无信息量
+    // 且不带分类 —— 直接抛 2Captcha 自己的错误对象,它的标志(infra/budget/terminal)
+    // 才是真的。只有 capsolver 真失败过,才保留原始错误并透传标记。
+    if (csErr.placeholder) {
+      e2.message = `未配 capsolver_key,2Captcha 直投失败: ${e2.message}`;
+      throw e2;
+    }
     // 降级通道撞基建/预算:标记必须透传,否则调用方认不出,照样把域烧 blocked。
     if (e2 && e2.infra) csErr.infra = true;
     if (e2 && e2.budget) csErr.budget = true;

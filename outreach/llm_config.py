@@ -156,6 +156,10 @@ def _units():
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
+class AmbiguousUrl(ValueError):
+    """地址写法有歧义(Python 与 WHATWG URL 解析不一致),拒绝而不是猜。"""
+
+
 def origin_of(u):
     """(scheme, host, port) —— **必须与 llm_config.mjs 的 originOf 逐字符同结果**。
     这是同源绑定的判据本身:两边归一化不一致 = 一种语言拒绝、另一种放行。
@@ -163,16 +167,27 @@ def origin_of(u):
     (WHATWG URL 会自动做前两条,Python 的 urlparse 不会 —— 之前 py 用 netloc、
      js 用 host,`API.x.com` 与 `x.com:443` 在两边判定相反。)"""
     from urllib.parse import urlparse
-    p = urlparse(chat_url(u))
+    raw = chat_url(u)
+    # 【修】Python urlparse 与 Node 的 WHATWG URL 对畸形地址解析**不同**:
+    #   https://old.com\@new.com/v1  → py hostname=new.com,js hostname=old.com
+    #   https://old.com\.new.com/v1  → py 保留反斜杠,js 截成 old.com
+    # configure 用 py 判"同不同源"、真实请求走 js/curl —— 差异足以绕过换源检查
+    # (双本地端口实测:新 host 收到了旧 Authorization)。
+    # 这里不去模仿 WHATWG 的容错,而是**把歧义写法整个拒掉**:反斜杠、userinfo、
+    # 空白、非 http(s) 一律不接受。正规的 LLM 端点没有一个需要这些。
+    if any(c in raw for c in "\\ \t\r\n") or "@" in raw.split("//", 1)[-1].split("/", 1)[0]:
+        raise AmbiguousUrl(f"地址含反斜杠/空白/userinfo,写法有歧义,拒绝:{raw[:80]}")
+    p = urlparse(raw)
     scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise AmbiguousUrl(f"只支持 http/https,收到 {raw[:80]}")
     try:
         host = (p.hostname or "").lower().strip("[]")
-    except ValueError:                       # 畸形 netloc
-        host = (p.netloc or "").lower()
-    try:
         port = p.port
-    except ValueError:
-        port = None
+    except ValueError as e:
+        raise AmbiguousUrl(f"地址无法解析({e}):{raw[:80]}")
+    if not host:
+        raise AmbiguousUrl(f"地址没有主机名:{raw[:80]}")
     return (scheme, host, port or DEFAULT_PORTS.get(scheme, 0))
 
 
@@ -206,11 +221,18 @@ def load():
         base = winner["base"] or DEFAULT_BASE
         sources["base"] = winner["name"] if winner["base"] else f"缺省(跟随 {winner['name']} 的 key)"
         # 歧义检测:别的单元指了不同 origin 的 base
-        chosen = _origin(base)
+        try:
+            chosen = origin_of(base)
+        except AmbiguousUrl as e:
+            raise RuntimeError(f"LLM base URL 写法有歧义,拒绝使用:{e}")
         for u in units:
             if u is winner or not u["base"]:
                 continue
-            if _origin(u["base"]) != chosen:
+            try:
+                other = origin_of(u["base"])
+            except AmbiguousUrl:
+                other = None            # 解析不了 = 一定不同源,走下面的拒绝路径
+            if other != chosen:
                 msg = (f"LLM 配置有歧义,拒绝猜:\n"
                        f"  key 来自 {winner['name']},对应地址 {chat_url(base)}\n"
                        f"  但 {u['name']} 指定了另一个地址 {chat_url(u['base'])}\n"

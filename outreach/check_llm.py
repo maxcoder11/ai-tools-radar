@@ -67,12 +67,17 @@ def probe(url, key, model, timeout=45):
     except Exception:
         return False, "响应结构异常", f"没有 choices[0].message.content:{str(raw)[:160]}"
     try:
-        json.loads(content)
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            # 【修】原来只要能 json.loads 就算过 —— 数组/字符串/布尔全放行,
+            # 而 llm_judge 拿到后直接 j.get() → AttributeError,邮件反复回队。
+            # 运行期要的是**对象**,预检就按对象校验。
+            raise TypeError(f"顶层是 {type(parsed).__name__} 而不是对象")
     except Exception:
         # 没报错但吐的不是 JSON:比直接 400 更阴险 —— sweeper 会每封信都解析失败
         return False, "json_object 形同虚设", (
-            f"端点收下了 response_format 却返回了非 JSON,sweeper 会逐封解析失败。"
-            f"实际返回:{str(content)[:120]}")
+            f"端点收下了 response_format 却没返回 JSON 对象,sweeper 会逐封解析失败"
+            f"(llm_judge 拿到后 .get() 会抛)。实际返回:{str(content)[:120]}")
     return True, "可用", f"json_object 生效,返回 {str(content)[:60]}"
 
 

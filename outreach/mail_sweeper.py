@@ -1368,12 +1368,18 @@ def preflight():
     if missing:
         return False
 
-    if os.environ.get("SKIP_LLM_CHECK"):
-        log("(SKIP_LLM_CHECK=1,跳过 LLM 端点预检)")
+    # 【修】原来按"非空字符串"判断 —— SKIP_LLM_CHECK=0 / false / no 也会跳过预检。
+    if (os.environ.get("SKIP_LLM_CHECK") or "").strip().lower() in ("1", "true", "yes", "on"):
+        log("(SKIP_LLM_CHECK 已开启,跳过 LLM 端点预检)")
         return True
     try:
         import check_llm
-        cfg = llm_config.require_llm("mail_sweeper")
+        # 【修】原来这里重新 load() —— 运行期用的是模块加载时冻结的 _LLM,
+        # 若启动过程中配置由 A 改成 B,预检验的是 B、跑起来用的是 A。
+        # 必须探**运行期真正会用的那一份**。
+        cfg = _LLM
+        if not cfg["key"]:
+            llm_config.require_llm("mail_sweeper")   # 借它抛带指引的错误
         # 【修】原来只探 models[0]:主模型挂了但降级链可用时,llm_judge 本来跑得通,
         # 预检却把常驻整个拦下。按 llm_judge 的真实行为来 —— 任一模型能用就放行。
         ok, verdict, detail, good = False, "", "", None

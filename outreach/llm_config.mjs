@@ -88,8 +88,17 @@ const DEFAULT_PORTS = { 'http:': 80, 'https:': 443 };
 /** (scheme, host, port) —— **必须与 llm_config.py 的 origin_of 逐字符同结果**。
  *  见 .py 同名函数的注释:两边归一化不一致 = 一种语言拒绝、另一种放行。 */
 export function originOf(u) {
+  const raw = chatUrl(u);
+  // 与 .py 同口径:歧义写法(反斜杠/空白/userinfo/非 http(s))整个拒掉,不猜。
+  // 两边"能接受的集合"必须一样,否则一边拒一边放 = 换源检查可被绕过。
+  const authority = String(raw).split('//')[1] || '';
+  if (/[\\\s]/.test(raw) || authority.split('/')[0].includes('@')) {
+    return `AMBIGUOUS|${raw.toLowerCase()}|0`;
+  }
   try {
-    const p = new URL(chatUrl(u));
+    const p = new URL(raw);
+    if (p.protocol !== 'http:' && p.protocol !== 'https:') return `BAD|${raw.toLowerCase()}|0`;
+    if (!p.hostname) return `BAD|${raw.toLowerCase()}|0`;
     const scheme = p.protocol.replace(/:$/, '').toLowerCase();
     const host = p.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     const port = p.port ? Number(p.port) : (DEFAULT_PORTS[p.protocol] || 0);

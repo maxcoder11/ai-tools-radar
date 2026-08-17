@@ -10,14 +10,69 @@
 | R2 | Codex 一审 | 判定**不建议合并**:5 P1 + 10 P2 + 1 条既存风险。**全对** |
 | R3 | Claude | 按 R2 清单全修 + 逐条实测 |
 | R4 | Codex 二审 | 判定"P1 全部已修"**不成立**:6 个新 P1 + 10 条其他。**又是全对** |
-| R5 | Claude | 按 R4 清单全修 + 逐条实测 ← **本文档写的是这之后的状态** |
+| R5 | Claude | 按 R4 清单全修 + 逐条实测 |
+| R6 | Codex 三审 | 仍判**不建议合并**:7 P1 + 12 P2。**又是全对** |
+| R7 | Claude | 按 R6 清单全修 + 逐条实测 ← **本文档写的是这之后的状态** |
 
-R4 的六条 P1 里,**4 条是 R3 的修复本身引入的、或只修了一半**。连续两轮被找出
-"修了一半",这个模式值得下一轮继续按 §9 的两个问题扫。
+**连续三轮外审,每轮都找出"上一轮只修了一半"。** R6 的 7 条 P1 里有 5 条属于此类:
+
+- `driver.load_state` 做了键归一,**`state.mjs/py` 的 `currentStatus` 没做** ——
+  账本里躺着 `www.Example.com/success` 时 `claimDelivery` 仍返回 `claimed:true`
+- `spentToday` 改成 fail-closed 了,**`readJsonl` 没改** —— 账本只写不可读时
+  认领闸整个 fail-open(实测 chmod 200 后仍 `claimed:true`)
+- `configure` 与 `llm_config` 的 origin 统一了,但**统一到了 Python urlparse** ——
+  真实请求走 Node WHATWG URL,`https://old.com\@new.com` 两边解析出不同 host
+- `llm_config` 的路径 env 归一了,**`OUTREACH_STATE_DIR` 没归一** —— 相对路径下
+  py 按 cwd、node 按 driver 传的 cwd,两套账本
+- `sawAnyPage` 守卫加了,但它在**判 notFound 之前**置位 —— 渲染出来的 404 也算"看过页面"
+
+这个模式值得下一轮继续按 §9 的两个问题扫。
 
 ---
 
-## 1. R4(二审)的 P1 —— 已修
+## 1. R6(三审)的 P1 —— 已修
+
+| # | 位置 | 问题 | 修法 |
+|---|---|---|---|
+| 1 | `configure.py` | 比的是文件里的原始 `base_url`,不是**运行期实际生效**的 —— 旧配置只有 key、base 为空时运行期回落 OpenAI,而这里读到空串就跳过换源检查 | 空 base 按 `DEFAULT_BASE` 参与比较 |
+| 2 | `configure.py` / `llm_config` | origin 判定用 Python `urlparse`,真实请求走 Node WHATWG URL:`https://old.com\@new.com` → py 得 `new.com`、js 得 `old.com`,**换源检查可绕过**(双端口实测新 host 收到旧 Authorization) | 不模仿 WHATWG 容错,**把歧义写法整个拒掉**(反斜杠/空白/userinfo/非 http(s)),两边同口径 |
+| 3 | `state.mjs:109` / `state.py:148` | **`currentStatus` 只 canon 查询侧、不 canon 行侧** → 历史 `www.Example.com/success` 查不到 → `claimDelivery` 返回 `claimed:true` → 重复 POST。R5 只修了 driver 选池,直接跑 agent 仍中招 | 两侧都过 `rowKey`/`_row_key`;`stateRows`/`domainsWithStatus`/`verificationRows` 一并归一 |
+| 4 | `state.mjs:101` | `readJsonl` 吞掉一切读失败 → 账本只写不可读时返回空 → **唯一的投递闸 fail-open** | 只有 ENOENT 算空,其余抛;Python 侧同步 |
+| 5 | `capsolver.mjs:294` | only-2Captcha 分支的占位 `csErr` 没有任何分类标志,2Captcha 供应商故障(无效 key)于是 `infra/budget/noSolver/terminal` 全 false → 顶层烧目标域 | 占位打 `placeholder` 标记,真出错时直接抛 2Captcha 自己的错误对象 |
+| 6 | `verify_link.mjs:435` | `sawAnyPage` 在**判 notFound 之前**置位 → 渲染出的 404 也算"看过页面";1 个 recorded 404 + 120 个预筛 404 → `probed_pages=121` → `offline_confirmed` | 挪到 notFound 判定**之后** |
+| 7 | `driver.py:41` / `state.*` | 相对 `OUTREACH_STATE_DIR` 按 cwd 解析,而 driver 以 `cwd=outreach` 启 node → **py 与 node 两套账本**,投达态互不可见 | 空串当未设、相对路径锚到 `outreach/`(与 `llm_config` 同口径) |
+
+### R6 的 12 条 P2 —— 已修
+
+锁超时错误文本带上 `ledger locked` 以匹配调用方的 `/locked|busy/`;driver 接住
+`RuntimeError`(原来只接 `ValueError`,锁超时会带 traceback 打死整波);锁释放改成
+"rename 到私名再删"消除 TOCTOU(py/js 同步);CapSolver 的相对 `OUTREACH_MY_SITE`
+与 `llm_config` 同口径;人工任务入队失败**不再落终态 manual**(否则域被永久排除却无人处理),
+blocker 名统一;only-2Captcha 无代理时 CF 分支改抛 `noSolver` 而非返回普通字符串;
+preflight 探的改成**运行期冻结的那份配置**;`SKIP_LLM_CHECK`/`LLM_ALLOW_SPLIT_CONFIG`
+按真布尔解析;`check_llm.probe` 要求 JSON **顶层是对象**(数组/字符串会让 `llm_judge` 抛);
+`VERIFY_PREFILTER_BUDGET_MS` 钳到 [5s,120s];OTP 主题支持句末域名(`Verify x.com.`)
+同时仍挡住 `x.com.evil`;`build_data.NOT` 拆成 EXACT(整串相等)+ PREFIX,修掉
+`notion.so → notion.software` 这类前缀误伤。
+
+**注意**:`NOT` 我第一版顺手加了"子域也算",实测会把 1286 个 `*.wordpress.com` /
+`*.blogspot.com` 一起过滤 —— 那是扩大范围不是修 bug,已改回最小修复(只补 `$` 边界)。
+
+### 关键验证
+
+```
+历史 raw 键 www.Legacy.com/success → currentStatus 可见(py/js 都)、不重复认领
+账本只写不可读(chmod 200) → 抛 "账本读取失败…fail-closed",不再放行
+歧义地址 https://old.com\@new.com → py 与 js 同样拒绝
+OTP 边界:Verify x.com. ✅ / Verify x.com! ✅ / x.com.evil ❌ / x.commerce ❌
+NOT:notion.software/x.company/medium.community/shop.application 全部放行,
+     notion.so/x.com/medium.com/shop.app 仍过滤,*.wordpress.com 不受影响
+配置解析对拍:33 用例 0 不一致
+```
+
+---
+
+## 2. R4(二审)的 P1 —— 已修
 
 | # | 位置 | 问题 | 修法 |
 |---|---|---|---|
@@ -65,7 +120,7 @@ OUTREACH_MY_SITE 生效 → sweeper 与 configure 读同一个文件
 
 ---
 
-## 2. R2(一审)的 P1 —— 已修
+## 3. R2(一审)的 P1 —— 已修
 
 1. **LLM key 与 endpoint 没有原子绑定(5 条路径)**。根因是优先级做成了**按字段各自降级**,
    base 与 key 可以来自不同来源 → "A 供应商的 key 发给 B 供应商的地址"。
@@ -80,7 +135,7 @@ OUTREACH_MY_SITE 生效 → sweeper 与 configure 读同一个文件
 4. **成本账本仍未 fail-closed**(R4 又补了两个边界)。
 5. **预检只测主模型** → 按 `llm_judge` 的真实行为遍历降级链。
 
-## 3. R2 的 P2 —— 已修
+## 4. R2 的 P2 —— 已修
 
 `esc()` 的 `&#39;` 无效(HTML 属性值在内联 handler 编译成 JS **之前**就已实体解码,
 真浏览器 PoC 可执行注入)→ 改 `data-*` + 事件委托,内联 handler 里一个不可信值都不放;
@@ -92,32 +147,35 @@ driver 回读键、2Captcha+CF 转人工、OTP 右边界含 `.`、park 超时不
 
 ---
 
-## 4. 请重点看这几处(我最不确定的)
+## 5. 请重点看这几处(我最不确定的)
 
-### 4.1 锁现在护住了整条状态写路径 ★
+### 5.1 锁现在护住了整条状态写路径 ★
 
 R5 把 `upsertSubmission`(Node + Python 两侧)都放进了锁。这是本轮**改动面最大**的地方:
 
 - 所有状态写现在都要拿锁,**热路径上多了一次文件锁开销**;账本本来就是全文件扫描,
   叠加之后 `--loop` 长跑的表现没有实测过
-- 锁等待 8s 超时会抛 `RuntimeError`/`Error`。**这条异常路径在各调用方的归属我仍没有
-  端到端验证** —— 它会走 `e.ledger`(exit 43,域留池不烧)还是落到通用 catch 记 blocked?
+- 锁超时的归属 R6 已指出两个问题并修掉:错误文本现在带 `ledger locked` 以匹配调用方的
+  `/locked|busy/`;driver 接住 `RuntimeError` 不再带 traceback 打死整波。
+  **但"锁超时 → agent 顶层落到哪个分支"仍没有端到端跑过**(是 `e.ledger` 的 exit 43
+  域留池,还是通用 catch 记 blocked?)。
 - Python 侧 `with_file_lock` 与 Node 侧 `withFileLock` 是两份实现、共用一把锁文件。
-  **它们的陈旧接管窗口(30s)和等待超时(8s)必须一致**,现在是手工对齐的,没有对拍
+  陈旧接管窗口(30s)、等待超时(8s)、释放手法(rename 到私名再删)三者必须一致,
+  **现在是手工对齐的,没有对拍** —— 这是下一轮最值得写测试的地方
 
-### 4.2 同源绑定的"拒绝"是行为破坏性变更
+### 5.2 同源绑定的"拒绝"是行为破坏性变更
 
 一类**以前能跑**的配置现在直接报错,例如环境里有 `OPENAI_API_KEY`(给别的工具用)
 + `llm.json` 指了自定义 endpoint。我认为拒绝优于猜(那正是 P1 的根因),
 但请判断:默认拒绝 + 逃生阀,还是默认放行 + 响亮告警?
 
-### 4.3 `verify_link` 判死门槛已叠三层收紧
+### 5.3 `verify_link` 判死门槛已叠四层收紧
 
 `sawAnyPage`(R3)+ 403/429/5xx 不计证据(R3)+ 只有 404/410 算不在(R5)。
 方向是"判死门槛应高于判活",但**我始终没有真实域名样本验证分布变化** ——
 可能过严,导致真掉链的站永远攒不够 3 次 `offline_confirmed`。这条最好用真实数据跑一轮。
 
-### 4.4 `configure.py` 仍是最高风险面
+### 5.4 `configure.py` 仍是最高风险面
 
 **四轮里三次在这个文件出问题**(R2 前自查一条凭据外泄、R2 两条、R4 一条)。
 请假定还有第五条。当前边界:
@@ -127,14 +185,15 @@ R5 把 `upsertSubmission`(Node + Python 两侧)都放进了锁。这是本轮**�
   (设计如此:那是他自己敲的)。这个边界对不对?
 - `_write()` 的 tmp 窗口、`save()` 异常路径下的字段保留
 
-### 4.5 看门狗强退时的 `SIGKILL`
+### 5.5 看门狗强退时的 `SIGKILL`(R6 已给出结论,保留备忘)
 
-`killBrowserSync()` 用 `browser.process()` 拿 pid 再 SIGKILL,CDP 模式不登记
-(连的是用户自己的浏览器)。请核:非 CDP 下 `browser.process()` 是否总可用、pid 是否可能已回收。
+R6 复核:`browser.process()` **在当前 Playwright 版本上不存在**,但 1.62.1 在
+`process.exit()` 时会同步清理浏览器进程,真进程测试未遗留 Chromium —— 所以
+`killBrowserSync()` 实际是个空操作兼保险。留着无害,但**别把它当成有效防线**。
 
 ---
 
-## 5. 这些是有意为之,别当 bug "修"
+## 6. 这些是有意为之,别当 bug "修"
 
 - **`mail_sweeper` 不给 `json_object` 做自由文本降级** —— 它驱动不可逆动作
   (写状态、点一次性验证链接),改成启动预检实探。`agent_submit` 有降级是对的
@@ -149,7 +208,7 @@ R5 把 `upsertSubmission`(Node + Python 两侧)都放进了锁。这是本轮**�
 
 ---
 
-## 6. 一处已自我更正的结论,别继承错前提
+## 7. 一处已自我更正的结论,别继承错前提
 
 R1 我判断前端打字卡顿的瓶颈是 `LINKS_IDX.includes()`(15k × 1360 线性扫)。
 **A/B 实测证伪**:354ms → 363ms 在噪声内。分段:
@@ -163,7 +222,7 @@ Set 那个改动留着了(数据结构本来就该是 Set),但**不解决卡顿*
 
 ---
 
-## 7. 仍未修的(知情不做)
+## 8. 仍未修的(知情不做)
 
 - **告警出口缺失**:`alerts` 模块不在仓里 → "QQ 信箱读到 0 封"这类事件只进日志。
 - **账本全文件扫描 + 无压实路径**:`currentStatus`/`foldHumanTasks`/`spentToday`/
@@ -177,7 +236,7 @@ Set 那个改动留着了(数据结构本来就该是 Set),但**不解决卡顿*
 
 ---
 
-## 8. 复核入口(不需要真 key / 不需要网络)
+## 9. 复核入口(不需要真 key / 不需要网络)
 
 ```bash
 python3 outreach/tests/test_llm_config_parity.py   # 33 用例:歧义拒绝 / split 开关 / origin 归一化
@@ -220,7 +279,7 @@ sleep 6; grep -c CLAIMED $D/out.txt      # 必须是 1
 
 ---
 
-## 9. 评审时值得带着的两个问题
+## 10. 评审时值得带着的两个问题
 
 四轮 findings 高度集中在这两个形状:
 

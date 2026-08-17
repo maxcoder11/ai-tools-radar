@@ -229,7 +229,12 @@ const PREFILTER_CONCURRENCY = +(process.env.VERIFY_PREFILTER_CONCURRENCY || 10);
 // 最坏就是 180s,正好等于下面单域看门狗的 180s 硬顶,而 Promise.race 又不会取消
 // 已经发出的请求 —— 于是"为了不打扰目标站"反倒把整域拖成 unknown。
 // 现在:并发 10 + 单请求 6s + 整段 40s 预算,到点就把剩下的候选当"没排除掉"交给渲染。
-const PREFILTER_BUDGET_MS = +(process.env.VERIFY_PREFILTER_BUDGET_MS || 40000);
+const PREFILTER_BUDGET_MS = (() => {
+  // 【修】NaN/Infinity 会让截止时间失效;0/负数会把全部候选直接送去浏览器渲染
+  // (最多 8 次 × 25s 导航,撞 180s 看门狗)。钳到 [5s, 120s],非法回落 40s。
+  const n = Number(process.env.VERIFY_PREFILTER_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 5000), 120000) : 40000;
+})();
 const PREFILTER_TIMEOUT_MS = 6000;
 
 async function mapLimit(items, limit, fn) {
@@ -432,9 +437,13 @@ async function verifyDomain(pg, dom, prod) {
       if (r.error) { networkErrors++; continue; }
       // 被挡(403/429/5xx)既不算"看过页面"也不算"明确结论" —— 它只说明我们进不去。
       if (r.blocked) { blockedPages++; continue; }
-      sawAnyPage = true;
       probedPages++;
+      // 【修】原来在判 notFound **之前**就置 sawAnyPage —— 一个渲染出来的 404 也算
+      // "真看过页面",于是 sawAnyPage 守卫形同虚设(实测:1 个 recorded 404 + 120 个
+      // 预筛 404 → probed_pages=121 → offline_confirmed,三轮把伪装 404 的正常站写成 failed)。
+      // sawAnyPage 的本意是"我们确实拿到过一个**正常的**页面",404 不是。
       if (r.notFound || r.nothingFound) continue;   // 搜索页"无结果"文案=判负
+      sawAnyPage = true;
 
       let anchors = r.direct || [];
       // 侧栏/widget 回显锚全 oracle 不算数:真评论的作者链在评论区(非 widget),

@@ -1056,7 +1056,14 @@ async function actImpl(pg, a, dom) {
       // cf_clearance 绑定 IP+UA,CapSolver 用自己机房 IP 解出来的票对我们无效。
       // 给它配同一个代理(--proxy / HTTPS_PROXY),让它借我们的出口。
       const proxy = publicProxyUrl();
-      if (!proxy) return '未配代理(--proxy / HTTPS_PROXY),AntiCloudflareTask 解出的 cf_clearance 绑不住我们的 IP,不可用';
+      if (!proxy) {
+        // 【修】原来直接 return 一个普通字符串 —— 主循环把它当"这一步没成",继续烧步数,
+        // 最后多半落 blocked。整页 CF 挑战没代理是**结构性过不去**(cf_clearance 绑 IP),
+        // 和"没 solver"是同一类:该转人工,不该把域烧掉。
+        const e = new Error('整页 Cloudflare 挑战需要与解题同出口的代理(--proxy / HTTPS_PROXY),当前未配');
+        e.noSolver = true;
+        throw e;
+      }
       // CapSolver 要挑战页的 HTML 才认得出是哪种挑战(2026-07-27 实测:不给就
       // ERROR_INVALID_TASK_DATA "the 'html' field is required")。我们此刻正停在
       // 那一页上,直接取当前 DOM 给它 —— 比让它自己再抓一次更准,因为挑战页是
@@ -2558,14 +2565,25 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       // 只配 2Captcha 却撞上 CapSolver 独有任务(整页 CF 挑战)时,noSolver 从
       // solveWithFallback 抛出,人工队列是空的 → 状态 manual 但没人知道要去做。
       // 这里补一次幂等入队(humanTaskAdd 同域同 blocker 折叠,重复调用无害)。
-      try {
-        queueForHuman(dom, 'captcha_manual',
-          `${String(e.message).slice(0, 120)} —— 请在 ${dom} 页面里人工过验证码再提交(字段已预填)`);
-      } catch (qe) { console.log(`[${dom}] 人工入队失败:${String(qe.message).slice(0, 60)}`); }
-      try {
-        upsert(dom, 'manual', `${String(e.message).slice(0, 120)}:已转人工队列(human_tasks.jsonl)`);
-      } catch (ue) { if (ue && ue.ledger) throw ue; }
-      console.log(`[${dom}] 验证码无 solver → manual(转人工)`);
+      // 【修】queueForHuman 内部吞异常并**返回 false**,外面的 try/catch 捕不到 ——
+      // 原来入队失败照样写 manual:driver 视 manual 为终态永久排除该域,而人工队列
+      // 里根本没有这条任务 = 静默丢站。现在看返回值:入不了队就不落 manual,
+      // 让它按普通失败留池,下波重试。
+      // blocker 统一用 'captcha_manual'(no-key 路径用的是 captcha_turnstile 等),
+      // 避免同一个域因名字不同留下两条 pending。
+      const queued = queueForHuman(dom, 'captcha_manual',
+        `${String(e.message).slice(0, 120)} —— 请在 ${dom} 页面里人工过验证码再提交(字段已预填)`);
+      if (queued) {
+        try {
+          upsert(dom, 'manual', `${String(e.message).slice(0, 120)}:已转人工队列(human_tasks.jsonl)`);
+          console.log(`[${dom}] 验证码无 solver → manual(转人工)`);
+        } catch (ue) { if (ue && ue.ledger) throw ue; }
+      } else {
+        // 入不了队就**不落 manual**:manual 是终态,driver 会永久排除该域,
+        // 而人工队列里没有这条任务 = 静默丢站。域留池,下波重试。
+        console.error(`[${dom}] 人工入队失败,不落 manual(否则该域被永久排除却无人处理),域留池`);
+        process.exitCode = process.exitCode || 43;
+      }
     } else if (e && e.budget) {
       // 日预算熔断:写事件(reason_code=budget_exceeded,此前定义了没人用),不写
       // submissions 行(域留池),exit 42 通知驱动停波 —— 不然后面每个带验证码的域

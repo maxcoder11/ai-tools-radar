@@ -45,6 +45,7 @@ import check_llm  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MY_SITE = llm_config.MY_SITE          # 同一份路径(env OUTREACH_MY_SITE 可覆盖)
+DEFAULT_BASE = llm_config.DEFAULT_BASE   # 旧配置 base 为空时运行期就回落到它
 TOKEN = secrets.token_urlsafe(12)
 PORT = 8790
 
@@ -87,7 +88,8 @@ def _write(path, obj):
 
 def _origin(u):
     """复用 llm_config.origin_of —— 同源判定全仓只能有一份实现,
-    否则 configure 与 llm_config 会对同一组配置给出相反结论。"""
+    否则 configure 与 llm_config 会对同一组配置给出相反结论。
+    歧义写法(反斜杠/userinfo 等)会抛 AmbiguousUrl,调用方转成人话拒绝。"""
     return llm_config.origin_of(u)
 
 
@@ -139,7 +141,11 @@ def save(body):
         if not new_base:
             return {"ok": False, "error": "Base URL 不能为空 —— 留空会回落到默认 OpenAI 地址,"
                                           "把已保存的 key 发过去。填供应商文档给的 base URL。"}
-        old_base = str(cur.get("base_url") or "").strip() if str(cur.get("api_key") or "").strip() else ""
+        # 【修】要比的是**运行期实际生效的**旧 endpoint,不是文件里的原始字符串:
+        # 旧 llm.json 只有 api_key、base_url 为空时,load() 会回落到默认 OpenAI ——
+        # 而这里读到空字符串就跳过了换源检查,旧 key 被留给新 endpoint(已复现)。
+        has_old_key = bool(str(cur.get("api_key") or "").strip())
+        old_base = (str(cur.get("base_url") or "").strip() or DEFAULT_BASE) if has_old_key else ""
         if old_base and not typed and _origin(new_base) != _origin(old_base):
             return {"ok": False, "error":
                     f"换了 endpoint({_origin(old_base)[1]} → {_origin(new_base)[1]})就必须重填 API Key。"

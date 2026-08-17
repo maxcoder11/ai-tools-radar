@@ -21,24 +21,48 @@ SITE = Path("/Users/wy/cafe/toolradar")
 # 代价是 betplentia 这类粘连写法漏掉,但 casino/slot 仍在,而误杀正常 AI 工具的代价更大。
 JUNK = re.compile(r"^\d+\.|casino|porn|xxx|(^|[.\-])(bet|bets|betting|sportsbook)([.\-]|$)"
                   r"|slot|seo-|\.xyz$|\.top$|\.club$|\.shop$|\.store$", re.I)
-NOT = re.compile(r"^(github\.com|tinyurl\.com|bit\.ly|open\.spotify\.com|ringcentral\.com|"
-                 r"digitalocean\.com|discogs\.com|myanimelist\.net|91mobiles\.com|liveinternet\.ru|"
-                 r"creators\.spotify\.com|spotify\.com|canva\.com|figma\.com|notion\.so|dropbox\.com|"
-                 r"zoom\.us|slack\.com|trello\.com|asana\.com|shopify\.com|wix\.com|squarespace\.com|"
-                 r"wordpress\.com|blogspot\.com|tumblr\.com|weebly\.com|bing\.com|microsoft\.com|t\.me|"
-                 r"brave\.com|search\.brave\.com|imdb\.com|google\.|facebook\.|youtube\.|instagram\.|"
-                 r"twitter\.|x\.com|linkedin\.|reddit\.|wikipedia\.|amazon\.|apple\.|play\.google|"
-                 # 【08-16】总榜头部纯度:撞名混进来的通用平台(电商/门户/社媒/链接工具),非 AI 工具
-                 r"walmart\.com|etsy\.com|zillow\.com|target\.com|flipkart\.com|taobao\.com|shop\.app|"
-                 r"vercel\.app|zoom\.com|salesforce\.com|rottentomatoes\.com|goodreads\.com|"
-                 r"trustpilot\.com|alibaba\.com|youtu\.be|deviantart\.com|"
-                 r"baidu\.com|duckduckgo\.com|quora\.com|accuweather\.com|live\.com|okta\.com|"
-                 r"bilibili\.com|snapchat\.com|threads\.com|onlyfans\.com|patreon\.com|vk\.com|max\.ru|"
-                 r"xiaohongshu\.com|t\.co|linktr\.ee|line\.me|bsky\.app|ilovepdf\.com|adobe\.com|"
-                 r"store\.steampowered\.com|chromewebstore\.|apps\.apple\.com|chat\.whatsapp\.com|"
-                 # 【08-16】原正则尾部的 )$ 让所有 a\.b\. 前缀模式失效(整串必须恰好在点号结束),
-                 # 导致 play.google.com/youtube.com 这类全漏。去掉 $,前缀即匹配。
-                 r"pinterest\.|tiktok\.|medium\.com|substack\.com)")
+# 非 AI-first 的通用平台(撞名混进来的电商/门户/社媒/链接工具),不上榜。
+# 【修】原来是一整条 `^(a|b|c|…)` 且去掉了尾锚,于是**精确域规则退化成前缀匹配**:
+#   notion.so → 命中 notion.software;x.com → 命中 x.company;
+#   medium.com → medium.community;shop.app → shop.application(实测)
+# 拆成两类,各自带正确的边界:
+#   EXACT  完整域名,必须整串相等(或是它的子域)
+#   PREFIX 品牌前缀,后面必须跟 `.` 或结尾(google. / pinterest. 这类原意如此)
+_NOT_EXACT = (
+    "github.com tinyurl.com bit.ly open.spotify.com ringcentral.com digitalocean.com "
+    "discogs.com myanimelist.net 91mobiles.com liveinternet.ru creators.spotify.com "
+    "spotify.com canva.com figma.com notion.so dropbox.com zoom.us slack.com trello.com "
+    "asana.com shopify.com wix.com squarespace.com wordpress.com blogspot.com tumblr.com "
+    "weebly.com bing.com microsoft.com t.me brave.com search.brave.com imdb.com x.com "
+    "walmart.com etsy.com zillow.com target.com flipkart.com taobao.com shop.app "
+    "vercel.app zoom.com salesforce.com rottentomatoes.com goodreads.com trustpilot.com "
+    "alibaba.com youtu.be deviantart.com baidu.com duckduckgo.com quora.com "
+    "accuweather.com live.com okta.com bilibili.com snapchat.com threads.com onlyfans.com "
+    "patreon.com vk.com max.ru xiaohongshu.com t.co linktr.ee line.me bsky.app "
+    "ilovepdf.com adobe.com store.steampowered.com apps.apple.com chat.whatsapp.com "
+    "medium.com substack.com"
+).split()
+_NOT_PREFIX = ("google.", "facebook.", "youtube.", "instagram.", "twitter.", "linkedin.",
+               "reddit.", "wikipedia.", "amazon.", "apple.", "play.google", "chromewebstore.",
+               "pinterest.", "tiktok.")
+# 只补边界,不改语义:EXACT 要求整串相等(原来缺 `$`,于是 notion.so 命中
+# notion.software);PREFIX 保持原样的前缀匹配(google. / pinterest. 本就是这个意图)。
+# **不加"子域也算"** —— 原规则没有这层语义,加了会把 1286 个 *.wordpress.com /
+# *.blogspot.com 一起过滤掉(实测),那是扩大范围,不是修 bug。
+_NOT_RE = re.compile(
+    "^(?:" + "|".join(re.escape(d) for d in _NOT_EXACT) + r")$"
+    "|^(?:" + "|".join(re.escape(x) for x in _NOT_PREFIX) + ")", re.I)
+
+
+class _Not:
+    """保持 NOT.search(d) 的调用形状不变。"""
+    @staticmethod
+    def search(d):
+        return _NOT_RE.search(d or "")
+
+
+NOT = _Not
+
 
 
 def main():

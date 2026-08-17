@@ -18,7 +18,9 @@ import time
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DIR = os.environ.get("OUTREACH_STATE_DIR", HERE)
+_sd = (os.environ.get("OUTREACH_STATE_DIR") or "").strip()
+# 【修】相对路径原来跟 cwd 走,py 与 node 会落到两个账本(见 state.mjs 同处注释)
+DIR = HERE if not _sd else (_sd if os.path.isabs(_sd) else os.path.join(HERE, _sd))
 STATE_FILE = os.path.join(DIR, "state.jsonl")
 EVENTS_FILE = os.path.join(DIR, "events.jsonl")
 CONSTRAINTS_FILE = os.path.join(DIR, "constraints.jsonl")
@@ -100,17 +102,24 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
             except FileNotFoundError:
                 continue                            # 刚被释放,下轮抢
             if time.time() - t0 > wait_sec:
-                raise RuntimeError(f"账本锁等待超时({wait_sec}s):{lock}")
+                # 带英文关键词,便于调用方与 JS 侧同口径识别(见 state.mjs 同处)
+                raise RuntimeError(f"ledger locked: 账本锁等待超时({wait_sec}s):{lock}")
             time.sleep(0.05)
             continue
         try:
             return fn()
         finally:
+            # 与 state.mjs 同:先 rename 到私名再删,避免"读 token→unlink"之间
+            # 锁被接管、删掉别人新建的锁
+            mine = f"{lock}.rel.{token}"
             try:
-                with open(lock) as f:
+                os.rename(lock, mine)
+                with open(mine) as f:
                     if f.read().split(" ")[0] == token:
-                        os.unlink(lock)
-            except Exception:
+                        os.unlink(mine)
+                    else:
+                        os.rename(mine, lock)
+            except OSError:
                 pass
 
 
@@ -121,6 +130,9 @@ def _append(file, obj):
 
 
 def _read_jsonl(file):
+    """【修】原来只 catch FileNotFoundError 之外还有个隐患:权限/IO 错会冒到调用方,
+    但调用方(current_status)没接 —— 与 JS 侧对齐:ENOENT 算空,其余原样抛,
+    绝不把"读不到"当成"没有记录"(那会让认领闸 fail-open)。"""
     try:
         with open(file) as f:
             out = []
@@ -135,17 +147,28 @@ def _read_jsonl(file):
             return out
     except FileNotFoundError:
         return []
+    except OSError as e:
+        raise RuntimeError(f"账本读取失败({file}: {e.strerror}),fail-closed")
+
+
+def _row_key(src):
+    """账本行的键归一(与 state.mjs 的 rowKey 同口径)。历史行不会自动迁移。"""
+    try:
+        return canon_domain(src)
+    except ValueError:
+        return str(src or "").lower()
 
 
 def current_status(domain):
-    """当前态投影:state.jsonl 里该域最后一行。"""
-    try:
-        dom = canon_domain(domain)
-    except ValueError:
-        dom = str(domain or "").lower()
+    """当前态投影:state.jsonl 里该域最后一行。
+
+    【修】原来 `r.get("src") == dom`:查询侧 canon 了、行侧没有 —— 账本里躺着
+    www.Example.com/success 时返回 None,认领闸随之放行。两侧都归一。
+    """
+    dom = _row_key(domain)
     cur = None
     for r in _read_jsonl(STATE_FILE):
-        if r.get("src") == dom:
+        if _row_key(r.get("src")) == dom:
             cur = r
     return cur
 

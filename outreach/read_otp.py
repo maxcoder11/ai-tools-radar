@@ -59,9 +59,10 @@ def _matches(dom_root, frm, subj):
     host = frm.rsplit("@", 1)[-1].strip(" <>\t")
     if host == dom_root or host.endswith("." + dom_root):
         return True
-    # 右边界也要排除 `.`,否则 tools.com 会命中主题里的 tools.com.evil(Codex P2)
+    # 右边界:要挡住 tools.com.evil,又不能误伤句末的 "Verify tools.com."。
+    # 区别在于 `.` 后面还有没有域名字符 —— 后面跟字母数字才是更长的域名。
     return re.search(r"(?:^|[^A-Za-z0-9.\-])" + re.escape(dom_root)
-                     + r"(?![A-Za-z0-9.\-])", subj) is not None
+                     + r"(?![A-Za-z0-9\-])(?!\.[A-Za-z0-9])", subj) is not None
 
 
 def _epoch(s):

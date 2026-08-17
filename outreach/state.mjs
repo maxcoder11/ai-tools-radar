@@ -19,7 +19,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const DIR = process.env.OUTREACH_STATE_DIR || HERE;
+// 【修】相对路径原来跟 cwd 走 —— driver 以 cwd=outreach 启动 node,而 driver 自己
+// 可能从仓库根跑,同一个环境变量于是落到两个不同的账本,投达态互相看不见。
+// 空串当未设,相对路径一律锚到 outreach/(与 llm_config 的 resolvePath 同口径)。
+const _sd = String(process.env.OUTREACH_STATE_DIR || '').trim();
+const DIR = !_sd ? HERE : (path.isAbsolute(_sd) ? _sd : path.join(HERE, _sd));
 export const STATE_FILE = path.join(DIR, 'state.jsonl');
 const EVENTS_FILE = path.join(DIR, 'events.jsonl');
 const COSTS_FILE = path.join(DIR, 'costs.jsonl');
@@ -93,20 +97,40 @@ function append(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n');
 }
 
+/** 宽容读:读不到当空。只给"没有也无所谓"的场景用(事件/约束枚举)。 */
 function readJsonl(file) {
-  try {
-    return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)
-      .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean);
-  } catch { return []; }
+  try { return parseJsonl(fs.readFileSync(file, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return [];
+    throw new Error(`账本读取失败(${file}: ${e.code || e.message}),fail-closed`);
+  }
+}
+
+/** 【修】原实现 `catch { return [] }` 吞掉一切读失败 —— 账本只写不可读(权限/IO)时
+ *  currentStatus 返回 null,claimDelivery 于是放行,**唯一的防重复投递闸直接 fail-open**
+ *  (实测:已有 success 的账本 chmod 200 后仍返回 claimed:true)。
+ *  现在只有 ENOENT(还没开张)算空,其余原样抛给调用方。 */
+function parseJsonl(raw) {
+  return raw.split('\n').filter(Boolean)
+    .map(l => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean);
 }
 
 /** 当前态投影:state.jsonl 里该域最后一行(写入端有守卫,投影即终态)。 */
+/** 账本行的键归一。**必须与写入端同口径** —— 历史行(老 driver 写的 www.Example.com)
+ *  不会自动迁移,拿 canon 键去精确比就永远匹配不上。 */
+function rowKey(src) {
+  try { return canonDomain(src); } catch { return String(src || '').toLowerCase(); }
+}
+
 export function currentStatus(domain) {
-  let dom;
-  try { dom = canonDomain(domain); } catch { dom = String(domain || '').toLowerCase(); }
+  const dom = rowKey(domain);
   let cur = null;
-  for (const r of readJsonl(STATE_FILE)) if (r.src === dom) cur = r;
+  // 【修】原来 `r.src === dom`:查询侧 canon 了、行侧没有 —— 账本里躺着
+  // www.Example.com/success 时,currentStatus('example.com') 返回 null,
+  // claimDelivery 于是返回 claimed:true → 重复 POST(实测复现)。
+  // R5 只修了 driver 的选池,直接跑 agent 仍会中招。这里是根:两侧都归一。
+  for (const r of readJsonl(STATE_FILE)) if (rowKey(r.src) === dom) cur = r;
   return cur;
 }
 
@@ -404,16 +428,28 @@ export function withFileLock(target, fn, waitMs = 8000) {
           continue;
         }
       } catch { continue; }                      // 锁刚被释放,下轮就能抢到
-      if (Date.now() - t0 > waitMs) throw new Error(`账本锁等待超时(${waitMs}ms):${lock}`);
+      // 【修】调用方(agent_submit 的 upsert/claimDelivery)按 /locked|busy/ 匹配才重试,
+      // 原来的中文文案对不上 → 声明的 6 次重试实际一次都不会发生。带上英文关键词。
+      if (Date.now() - t0 > waitMs) {
+        const e = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
+        e.lockTimeout = true;
+        throw e;
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
       continue;
     }
     try { return fn(); }
     finally {
-      // 只删仍然是自己的那把锁(被陈旧接管抢走后就别乱删别人的)
+      // 【修】原来"读 token → unlink"分两步:中间锁若被陈旧接管、别人已建新锁,
+      // 这一 unlink 删的就是**别人的**锁,第三个 writer 于是能并发进来。
+      // 改成先 rename 到自己的私名(原子),确认 rename 到的内容确实是自己的再删;
+      // rename 失败(锁已不是我的/已被接管)就什么都不做。
+      const mine = `${lock}.rel.${token}`;
       try {
-        if (fs.readFileSync(lock, 'utf8').split(' ')[0] === token) fs.unlinkSync(lock);
-      } catch {}
+        fs.renameSync(lock, mine);
+        if (fs.readFileSync(mine, 'utf8').split(' ')[0] === token) fs.unlinkSync(mine);
+        else fs.renameSync(mine, lock);          // 不是我的,原样放回
+      } catch { /* 锁已被接管或已释放 */ }
     }
   }
 }
@@ -428,14 +464,14 @@ const VERIFY_RESULTS = new Set(['online', 'offline_confirmed', 'unknown_network'
 export function stateRows(domain) {
   let dom;
   try { dom = canonDomain(domain); } catch { return []; }
-  return readJsonl(STATE_FILE).filter(r => r.src === dom);
+  return readJsonl(STATE_FILE).filter(r => rowKey(r.src) === dom);
 }
 
 /** 当前态落在 statuses 里的全部域名(--pending 的待核清单)。 */
 export function domainsWithStatus(statuses) {
   const want = statuses instanceof Set ? statuses : new Set(statuses);
   const latest = new Map();
-  for (const r of readJsonl(STATE_FILE)) if (r.src) latest.set(r.src, r.status);
+  for (const r of readJsonl(STATE_FILE)) if (r.src) latest.set(rowKey(r.src), r.status);
   return [...latest.entries()].filter(([, s]) => want.has(s)).map(([d]) => d).sort();
 }
 
@@ -451,7 +487,7 @@ export function recordVerification({ domain, result, ...rest }) {
 export function verificationRows(domain) {
   let dom;
   try { dom = canonDomain(domain); } catch { return []; }
-  return readJsonl(VERIFICATIONS_FILE).filter(r => r.domain === dom);
+  return readJsonl(VERIFICATIONS_FILE).filter(r => rowKey(r.domain) === dom);
 }
 
 /** 有过 online 核验记录的全部域名(--known 的复核清单,查掉链)。 */

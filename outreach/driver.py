@@ -134,6 +134,12 @@ def save_state(src, status, note=""):
     except ValueError as e:
         print(f"  [账本] {src} 写 {status} 被拒:{e}", flush=True)
         return
+    except RuntimeError as e:
+        # 【修】锁等待超时/账本不可读会抛 RuntimeError,原来只接 ValueError → 整个
+        # driver 带 traceback 退出(rc=1),一波投放全断。这是基建故障不是站的错:
+        # 记一行、域留池,继续下一个。
+        print(f"  [账本] {src} 写 {status} 失败(基建故障,域留池):{e}", flush=True)
+        return
     if not r.get("written"):
         print(f"  [账本] 状态守卫拒绝 {r['from']} → {status}"
               f"(投达态不被兜底打回),{src} 终局保持 {r['from']}", flush=True)
