@@ -116,12 +116,26 @@ export function load() {
   // 【修】原来 !!非空串 —— "0"/"false" 也会开启这个放行开关。按真布尔解析(与 .py 同)。
   const allowSplit = ['1', 'true', 'yes', 'on'].includes(env('LLM_ALLOW_SPLIT_CONFIG').toLowerCase());
 
+  // 【修】originOf 对畸形地址只返 AMBIGUOUS/BAD 哨兵,而只有"存在第二个配置源"时才会
+  // 走到比较逻辑 —— 单一来源的畸形 base 于是被原样接受:py 抛错、js 放行,
+  // Node fetch 真的连到 old.com 并带上 Authorization(实测)。**先把哨兵拦下来**。
+  const rejectSentinel = (b, where) => {
+    const o = originOf(b);
+    if (o.startsWith('AMBIGUOUS|') || o.startsWith('BAD|')) {
+      throw new Error(`LLM base URL 写法有歧义或不合法,拒绝使用(来自 ${where}):${chatUrl(b)}\n`
+        + `含反斜杠/空白/userinfo 的地址在 Python 与 Node 里解析成不同主机,`
+        + `会把 API key 发给非预期的域。请改成规范的 https://host/v1 形式。`);
+    }
+    return o;
+  };
+
   const winner = us.find(u => u.key) || null;
   let base, key;
   if (!winner) {
     const based = us.find(u => u.base) || null;
     base = based ? based.base : DEFAULT_BASE;
     sources.base = based ? based.name : '缺省';
+    rejectSentinel(base, sources.base);          // 没 key 也要拦,别把畸形地址传下去
     sources.key = '(未配置)';
     key = '';
   } else {
@@ -129,10 +143,10 @@ export function load() {
     sources.key = winner.name;
     base = winner.base || DEFAULT_BASE;
     sources.base = winner.base ? winner.name : `缺省(跟随 ${winner.name} 的 key)`;
-    const chosen = origin(base);
+    const chosen = rejectSentinel(base, sources.base);
     for (const u of us) {
       if (u === winner || !u.base) continue;
-      if (origin(u.base) !== chosen) {
+      if (rejectSentinel(u.base, u.name) !== chosen) {
         const msg = `LLM 配置有歧义,拒绝猜:\n`
           + `  key 来自 ${winner.name},对应地址 ${chatUrl(base)}\n`
           + `  但 ${u.name} 指定了另一个地址 ${chatUrl(u.base)}\n`

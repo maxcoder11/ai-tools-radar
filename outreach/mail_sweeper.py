@@ -490,16 +490,18 @@ def park_retry():
                 # 库内站却 2 小时都没处理成(handle 一直返回 False):这不是"非库内",
                 # 是卡住了。静默丢 = 验证信永久消失。转人工,别无声吞掉。
                 log(f"  ⚠️ {x['site']} 是库内站但挂起超 2h 仍未处理成,转人工(不丢件)")
+                queued = False
                 try:
-                    _queue_human(None, site,
-                                 f"挂起的 {x.get('subject','')[:60]} 超 2h 未能自动处理"
-                                 f"(mid={x['mid']}),请人工看这封信",
-                                 blocker="park_stuck")
+                    queued = _queue_human(None, site,
+                                          f"挂起的 {x.get('subject','')[:60]} 超 2h 未能自动处理"
+                                          f"(mid={x['mid']}),请人工看这封信",
+                                          blocker="park_stuck")
                 except Exception as e:
-                    # 【二修】原来入队失败照样 continue —— 磁盘/权限异常时信仍然丢了,
-                    # 而"转人工"是这条路径唯一的兜底。入不了队就**留在挂起表里**,
-                    # 下轮再试;宁可让表长一点,也不能无声吞掉一封验证信。
-                    log(f"  ⚠️ 转人工失败({type(e).__name__}: {str(e)[:60]}),该信留在挂起表下轮重试")
+                    log(f"  ⚠️ 转人工异常({type(e).__name__}: {str(e)[:60]})")
+                if not queued:
+                    # 入不了队就**留在挂起表里**下轮再试。这封信此前已被记为 done,
+                    # 挂起表是它唯一的重试入口,删掉 = 永久丢件。
+                    log(f"  ⚠️ {x['site']} 转人工未成功,留在挂起表下轮重试")
                     keep.append(x)
             else:
                 log(f"  {x['site']} 挂起超 2h 未见账,按非库内落定")
@@ -556,15 +558,22 @@ dbwpy_v2 = _load_dbwpy_v2()
 
 
 def _queue_human(pid, site, guidance, blocker, url=""):
-    """不敢自动判的写回转人工任务队列(v2 human_tasks,kind='mail',与 human_reply 同队列)。"""
+    """不敢自动判的写回转人工任务队列。**返回是否真的入队成功**。
+
+    【修】原来内部吞掉异常又不返回状态 —— 调用方的 try/except 永远不会执行,
+    于是"入队失败就别丢件"那条兜底形同虚设(实测超时邮件照样从挂起表删掉,
+    而它此前已被记为 done,等于删掉了唯一的重试入口)。
+    """
     try:
         v2_conn().execute(
             """INSERT INTO human_tasks (product_id, domain, url, blocker, guidance, status, created_at, kind)
                VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), 'mail')""",
             (pid or 1, site, url, blocker, (guidance or "")[:400]))
         log(f"  → {site} 已进人工任务队列({blocker})")
+        return True
     except Exception as e:
         log(f"  人工任务写入失败:{e}")
+        return False
 
 
 def _migrate_or_human(dbw_mod, pid, r_dom, what):
@@ -1343,7 +1352,7 @@ def sweep_once():
     return handled
 
 
-def preflight():
+def preflight(quick=False):
     """依赖必须在启动时就查明白,不能等到点链接时才静默失败。
 
     【开源移植】curl_cffi / agentmail 不在标准库里:pip install agentmail curl_cffi。
@@ -1371,6 +1380,17 @@ def preflight():
     # 【修】原来按"非空字符串"判断 —— SKIP_LLM_CHECK=0 / false / no 也会跳过预检。
     if (os.environ.get("SKIP_LLM_CHECK") or "").strip().lower() in ("1", "true", "yes", "on"):
         log("(SKIP_LLM_CHECK 已开启,跳过 LLM 端点预检)")
+        return True
+    # 【修】按需模式(--for-domain)是 agent 在等信时调的短命进程,父进程只给 120s:
+    # 预检每个模型最多 45s,主模型超时再由 fallback 通过就是 90s+,后面 sweep_for
+    # 还要等 90s —— 总计 135s+,晚到的 OTP 会被父进程提前杀掉。
+    # 这条路径不做完整预检:常驻那边已经把关,这里只确认 key 在。
+    if quick:
+        try:
+            llm_config.require_llm("mail_sweeper")
+        except RuntimeError as e:
+            log(f"❌ {e}")
+            return False
         return True
     try:
         import check_llm
@@ -1418,7 +1438,7 @@ if __name__ == "__main__":
         _wait = 90
         if "--wait" in sys.argv:
             _wait = int(sys.argv[sys.argv.index("--wait") + 1])
-        if not preflight():
+        if not preflight(quick=True):     # 按需模式:父进程只给 120s,别把预算烧在预检上
             # 【08-11 五轮评审 P1-8】依赖缺失直接非零退出,别跑降级流程让调用方干等
             sys.exit(3)
         sys.exit(0 if sweep_for(_dom, wait_s=_wait) else 2)   # 2 = 没等到信

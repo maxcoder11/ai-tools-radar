@@ -127,6 +127,39 @@ def state():
     }
 
 
+def _dry_run_llm(candidate):
+    """把候选配置写到临时文件,用**真实的 load()** 跑一遍。返回 (ok, 原因)。
+
+    校验必须在替换之前做:配置文件是所有组件的启动依赖,写进一份跑不起来的
+    等于把整套工具锁死,而用户在界面上只看到一句报错。
+    """
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="llm-dryrun-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(candidate, f, ensure_ascii=False)
+        old = os.environ.get("LLM_CONFIG")
+        os.environ["LLM_CONFIG"] = tmp
+        try:
+            import importlib
+            importlib.reload(llm_config)      # CONFIG_FILE 是模块级常量,要重读
+            llm_config.load()
+            return True, ""
+        except Exception as e:
+            return False, str(e).split("\n")[0][:200]
+        finally:
+            if old is None:
+                os.environ.pop("LLM_CONFIG", None)
+            else:
+                os.environ["LLM_CONFIG"] = old
+            importlib.reload(llm_config)      # 还原成真实路径
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def save(body):
     written = []
     if body.get("section") in (None, "llm"):
@@ -162,6 +195,12 @@ def save(body):
             "model": (body.get("model") or "").strip(),
             "fallbacks": fb,
         })
+        # 【修】原来先 _write 再靠 state()/load() 校验 —— 校验失败时**文件已经落盘**,
+        # 之后所有组件都拒绝启动(实测:env 里已有有效 A、保存 B 时接口报"配置有歧义",
+        # 但 B 已经写进去了)。改成:先在临时文件上跑一遍真实解析,通过了才替换。
+        ok, why = _dry_run_llm(cur)
+        if not ok:
+            return {"ok": False, "error": f"这份配置存不了(存了会让所有组件起不来):{why}"}
         _write(llm_config.CONFIG_FILE, cur)
         written.append(os.path.basename(llm_config.CONFIG_FILE))
     if body.get("section") in (None, "site"):

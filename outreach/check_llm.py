@@ -68,6 +68,11 @@ def probe(url, key, model, timeout=45):
         return False, "响应结构异常", f"没有 choices[0].message.content:{str(raw)[:160]}"
     try:
         parsed = json.loads(content)
+        if isinstance(parsed, dict) and parsed.get("ok") is not True:
+            # 【修】探针要的是 {"ok":true};只校验"是对象"的话 {"ok":false} 也算通过,
+            # 而运行期 llm_judge 拿到缺 kind 的对象会默认成 noise 并把邮件标记完成 ——
+            # 验证信就此被永久消费掉。探针必须验到底。
+            raise TypeError(f'返回了对象但不是 {{"ok":true}}:{str(parsed)[:80]}')
         if not isinstance(parsed, dict):
             # 【修】原来只要能 json.loads 就算过 —— 数组/字符串/布尔全放行,
             # 而 llm_judge 拿到后直接 j.get() → AttributeError,邮件反复回队。

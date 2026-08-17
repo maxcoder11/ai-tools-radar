@@ -236,6 +236,11 @@ const PREFILTER_BUDGET_MS = (() => {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 5000), 120000) : 40000;
 })();
 const PREFILTER_TIMEOUT_MS = 6000;
+// 单域总预算:必须明显小于 run() 里那个 180s 单域看门狗,给收尾留出余量。
+const DOMAIN_BUDGET_MS = (() => {
+  const n = Number(process.env.VERIFY_DOMAIN_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 10000), 170000) : 140000;
+})();
 
 async function mapLimit(items, limit, fn) {
   // 【修】NaN → Math.min(NaN,n)=NaN → Array.from({length:NaN}) 是空数组 → **0 个 worker,
@@ -402,6 +407,11 @@ async function verifyDomain(pg, dom, prod) {
   let probedPages = 0;   // 拿到明确 HTTP 结论的页面数(渲染的 + 预筛的)
   let blockedPages = 0;  // 被挡回(非 404/410)的页面数 —— 不算证据,只用于解释判不了
   const prefilterDeadline = Date.now() + PREFILTER_BUDGET_MS;   // 整域共享,不是每轮重置
+  // 【修】光给预筛设预算不够:预筛超时后剩下的候选全进 maybe,再逐个走浏览器导航
+  // (最多 8 个 × NAV_TIMEOUT 25s = 200s),40+200 仍然超过下面的 180s 单域看门狗,
+  // 而 Promise.race 不会取消后台的核验。这里给**整域**一个渲染截止时刻,
+  // 到点就停止再开新页(已开的那次跑完为止)。
+  const domainDeadline = Date.now() + DOMAIN_BUDGET_MS;
 
   // 候选 URL 按探针优先级排队
   const plans = [];
@@ -433,6 +443,11 @@ async function verifyDomain(pg, dom, prod) {
       if (!urls.length) continue;
     }
     for (const url of urls) {
+      if (Date.now() > domainDeadline) {
+        console.log(`  [verify] ${dom} 超单域渲染预算(${DOMAIN_BUDGET_MS / 1000}s),`
+          + `停止再开新页;已探 ${probedPages} 页、被挡 ${blockedPages} 页`);
+        break;
+      }
       const r = await inspect(pg, url, prod);
       if (r.error) { networkErrors++; continue; }
       // 被挡(403/429/5xx)既不算"看过页面"也不算"明确结论" —— 它只说明我们进不去。

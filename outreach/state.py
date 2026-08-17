@@ -20,7 +20,10 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 _sd = (os.environ.get("OUTREACH_STATE_DIR") or "").strip()
 # 【修】相对路径原来跟 cwd 走,py 与 node 会落到两个账本(见 state.mjs 同处注释)
-DIR = HERE if not _sd else (_sd if os.path.isabs(_sd) else os.path.join(HERE, _sd))
+# 【修】Node 的 path.join 只做词法归一(不解析 symlink),Python 的 open 交给内核、
+# 会跟随 symlink —— 同一个 OUTREACH_STATE_DIR 可能落到两个物理目录,两边看不见彼此。
+# 统一成**词法归一**(与 Node 一致):normpath 消掉 `..`,但不 realpath 解 symlink。
+DIR = os.path.normpath(HERE if not _sd else (_sd if os.path.isabs(_sd) else os.path.join(HERE, _sd)))
 STATE_FILE = os.path.join(DIR, "state.jsonl")
 EVENTS_FILE = os.path.join(DIR, "events.jsonl")
 CONSTRAINTS_FILE = os.path.join(DIR, "constraints.jsonl")
@@ -72,26 +75,42 @@ LOCK_STALE_SEC = 30
 LOCK_WAIT_SEC = 8
 
 
+def _pid_alive(pid):
+    """持锁进程是否还活着(与 state.mjs / creds.mjs 的 pidAlive 同实现)。"""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True                 # 存在但不属于我们
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
-    """跨进程排他锁。**与 state.mjs 的 withFileLock 同一把锁文件、同一套语义** ——
-    Node 侧(agent_submit/verify_link)和 Python 侧(mail_sweeper/driver)写的是同一个
-    投影,只有一边加锁等于没加。锁名 `<target>.lock`,O_EXCL 创建;陈旧锁用
-    "rename 成随机名、改名成功者才算抢到"的方式接管(直接 unlink 会让两个等待者都拿到锁)。
+    """跨进程排他锁。**与 state.mjs 的 withFileLock 同一把锁文件、同一套语义**。
+
+    【三修】前两版都错在"只看 mtime 就接管":持锁进程被 SIGSTOP/慢 IO/机器休眠超过
+    30s,另一个进程就把**活锁**偷走。同一个仓里的 creds.mjs 早就做对了 —— 查持锁进程
+    存活,活着绝不偷。释放也回到"读一次确认是自己的才 unlink"(上一版的
+    rename-恢复 会覆盖第三方新建的锁)。
     """
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     lock = target + ".lock"
     t0 = time.time()
+    token = f"{os.getpid()}-{uuid.uuid4()}"
     while True:
-        token = f"{os.getpid()}-{uuid.uuid4()}"
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(fd, f"{token} {now_utc()}\n".encode())
+            os.write(fd, f"{token} {os.getpid()} {now_utc()}\n".encode())
             os.close(fd)
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
             try:
-                if time.time() - os.stat(lock).st_mtime > LOCK_STALE_SEC:
+                raw = open(lock).read().split()
+                pid = int(raw[1]) if len(raw) > 1 and raw[1].isdigit() else None
+                stale = time.time() - os.stat(lock).st_mtime > LOCK_STALE_SEC
+                if stale and not (pid and _pid_alive(pid)):
                     grave = f"{lock}.stale.{uuid.uuid4()}"
                     try:
                         os.rename(lock, grave)      # 改名成功的那个才有权删
@@ -99,27 +118,20 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
                     except OSError:
                         pass                        # 抢输,回到循环
                     continue
-            except FileNotFoundError:
-                continue                            # 刚被释放,下轮抢
+            except (FileNotFoundError, IndexError, ValueError):
+                continue                            # 刚被释放/内容异常,下轮重来
             if time.time() - t0 > wait_sec:
-                # 带英文关键词,便于调用方与 JS 侧同口径识别(见 state.mjs 同处)
                 raise RuntimeError(f"ledger locked: 账本锁等待超时({wait_sec}s):{lock}")
             time.sleep(0.05)
             continue
         try:
             return fn()
         finally:
-            # 与 state.mjs 同:先 rename 到私名再删,避免"读 token→unlink"之间
-            # 锁被接管、删掉别人新建的锁
-            mine = f"{lock}.rel.{token}"
             try:
-                os.rename(lock, mine)
-                with open(mine) as f:
+                with open(lock) as f:
                     if f.read().split(" ")[0] == token:
-                        os.unlink(mine)
-                    else:
-                        os.rename(mine, lock)
-            except OSError:
+                        os.unlink(lock)
+            except Exception:
                 pass
 
 
@@ -135,20 +147,29 @@ def _read_jsonl(file):
     绝不把"读不到"当成"没有记录"(那会让认领闸 fail-open)。"""
     try:
         with open(file) as f:
-            out = []
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    pass
-            return out
+            raw = f.read()
     except FileNotFoundError:
         return []
     except OSError as e:
         raise RuntimeError(f"账本读取失败({file}: {e.strerror}),fail-closed")
+    # 【修】坏行原来静默跳过 —— 截断的 success 行会让 current_status 返回 None、
+    # 认领随之放行。与 JS 侧同口径:只容忍"文件不以换行结尾"时的最后一行。
+    ends_clean = raw.endswith("\n")
+    lines = raw.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    out = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            if not ends_clean and i == len(lines) - 1:
+                continue
+            raise RuntimeError(f"账本第 {i + 1} 行损坏({file}),fail-closed —— "
+                               f"修好或删掉这一行再跑")
+    return out
 
 
 def _row_key(src):

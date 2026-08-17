@@ -238,12 +238,28 @@ async function createTask2c(payload, meta = {}) {
     throw e;
   }
 
-  const r = await fetch(API2C + '/createTask', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientKey: key2c(), task: payload }),
-  });
-  const j = await r.json();
-  if (j.errorId) throw new Error(`2c createTask ${j.errorCode}: ${j.errorDescription}`);
+  let r, j;
+  try {
+    r = await fetch(API2C + '/createTask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientKey: key2c(), task: payload }),
+    });
+    j = await r.json();
+  } catch (ne) {
+    // 【修】网络失败原来抛裸 Error —— only-2Captcha 分支原样上抛后,agent 顶层认不出
+    // 是**供应商**故障,把目标站烧成 blocked。按基建瞬态标记(域留池、退避重试)。
+    const e = new Error(`2Captcha 网络失败: ${ne.message}`);
+    e.infra = true;
+    throw e;
+  }
+  if (j.errorId) {
+    const msg = `2c createTask ${j.errorCode}: ${j.errorDescription}`;
+    const e = new Error(msg);
+    // key 不对/账户没钱 = 我们这边的配置问题,不是目标站的错 → 基建,别烧域
+    if (/KEY_DOES_NOT_EXIST|ZERO_BALANCE|WRONG_USER_KEY|IP_NOT_ALLOWED/i.test(msg)) e.infra = true;
+    else if (TERMINAL_RE.test(msg)) e.terminal = true;
+    throw e;
+  }
 
   try {
     dbw.recordCost({
@@ -273,11 +289,21 @@ async function pollResult2c(taskId, timeoutMs = 120000) {
       body: JSON.stringify({ clientKey: key2c(), taskId }),
     });
     const j = await r.json();
-    if (j.errorId) throw new Error(`2c getTaskResult ${j.errorCode}: ${j.errorDescription}`);
+    if (j.errorId) {
+      const msg = `2c getTaskResult ${j.errorCode}: ${j.errorDescription}`;
+      const e = new Error(msg);
+      if (/KEY_DOES_NOT_EXIST|ZERO_BALANCE|WRONG_USER_KEY/i.test(msg)) e.infra = true;
+      else if (TERMINAL_RE.test(msg)) e.terminal = true;
+      throw e;
+    }
     if (j.status === 'ready') return j.solution;
-    if (j.status !== 'processing' && j.status !== 'idle') throw new Error('2c 未知状态 ' + j.status);
+    if (j.status !== 'processing' && j.status !== 'idle') {
+      const e = new Error('2c 未知状态 ' + j.status);
+      e.infra = true;            // 协议层异常也是供应商问题,不该记在目标站头上
+      throw e;
+    }
   }
-  throw new Error('2c 出码超时');
+  { const e = new Error('2c 出码超时'); e.infra = true; throw e; }
 }
 
 /**

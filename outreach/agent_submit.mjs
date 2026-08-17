@@ -1016,6 +1016,7 @@ async function actImpl(pg, a, dom) {
           `请在 ${dom} 页面里过 Turnstile 人机验证再提交(字段已预填)`);
         const e = new Error('有 Turnstile 验证码但 my_site.json 未配 capsolver_key');
         e.noSolver = true;
+        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
         throw e;
       }
       const key = await findSitekey(pg);
@@ -1110,6 +1111,8 @@ async function actImpl(pg, a, dom) {
           `请在 ${dom} 页面里过 reCAPTCHA 人机验证再提交(字段已预填)`);
         const e = new Error('有 reCAPTCHA 验证码但 my_site.json 未配 capsolver_key');
         e.noSolver = true;
+        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
+        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
         throw e;
       }
       const sitekey = await pg.evaluate(wd.extractRecaptchaSitekey);
@@ -2571,7 +2574,10 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       // 让它按普通失败留池,下波重试。
       // blocker 统一用 'captcha_manual'(no-key 路径用的是 captcha_turnstile 等),
       // 避免同一个域因名字不同留下两条 pending。
-      const queued = queueForHuman(dom, 'captcha_manual',
+      // 【修】无 key 的 turnstile/cf_challenge/recaptcha 分支**已经**用具体 blocker 建过任务,
+      // 这里再建一个 captcha_manual 就是两条 pending(任务按 domain|blocker 折叠,不会合并)。
+      // 那些分支抛错前会置 e.queued —— 已入队就不重复建,只复用。
+      const queued = e.queued || queueForHuman(dom, 'captcha_manual',
         `${String(e.message).slice(0, 120)} —— 请在 ${dom} 页面里人工过验证码再提交(字段已预填)`);
       if (queued) {
         try {
@@ -2581,7 +2587,11 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
       } else {
         // 入不了队就**不落 manual**:manual 是终态,driver 会永久排除该域,
         // 而人工队列里没有这条任务 = 静默丢站。域留池,下波重试。
-        console.error(`[${dom}] 人工入队失败,不落 manual(否则该域被永久排除却无人处理),域留池`);
+        // 【修】driver 的无声退出兜底靠 SILENT_SKIP_MARKERS 文本匹配才会"不补记 blocked",
+        // 原来这行不含任何标记 → driver 照样写 blocked,与"域留池下波重试"的意图相反。
+        // 用 LEDGER_WRITE_FAILED(driver 的 SILENT_SKIP_MARKERS 里有它)。
+        console.error(`[${dom}] LEDGER_WRITE_FAILED 人工入队失败,不落 manual`
+          + `(否则该域被永久排除却无人处理),域留池,exit 43`);
         process.exitCode = process.exitCode || 43;
       }
     } else if (e && e.budget) {

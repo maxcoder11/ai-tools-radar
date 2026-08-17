@@ -104,11 +104,16 @@ def load_state():
     """
     raw, canon = {}, {}
     if STATE.exists():
-        for line in open(STATE):
+        for i, line in enumerate(open(STATE)):
+            if not line.strip():
+                continue
             try:
                 r = json.loads(line)
             except Exception:
-                continue
+                # 与 state.py 同口径:坏行不许静默跳过 —— 一条截断的 success 行
+                # 会让这个域看起来"没投过",下一波重新投递。
+                raise RuntimeError(f"账本第 {i + 1} 行损坏({STATE}),"
+                                   f"修好或删掉这一行再跑,别让它被当成'没有记录'")
             src = r.get("src")
             if not src:
                 continue
@@ -134,11 +139,12 @@ def save_state(src, status, note=""):
     except ValueError as e:
         print(f"  [账本] {src} 写 {status} 被拒:{e}", flush=True)
         return
-    except RuntimeError as e:
-        # 【修】锁等待超时/账本不可读会抛 RuntimeError,原来只接 ValueError → 整个
-        # driver 带 traceback 退出(rc=1),一波投放全断。这是基建故障不是站的错:
-        # 记一行、域留池,继续下一个。
-        print(f"  [账本] {src} 写 {status} 失败(基建故障,域留池):{e}", flush=True)
+    except (RuntimeError, OSError) as e:
+        # 【修】锁等待超时/账本不可读抛 RuntimeError;**只读文件、磁盘满等写失败抛
+        # PermissionError/OSError**(上一版只接了 RuntimeError,这类异常仍会带 traceback
+        # 打死整波)。都是基建故障不是站的错:记一行、域留池,继续下一个。
+        print(f"  [账本] {src} 写 {status} 失败(基建故障,域留池):"
+              f"{type(e).__name__}: {e}", flush=True)
         return
     if not r.get("written"):
         print(f"  [账本] 状态守卫拒绝 {r['from']} → {status}"

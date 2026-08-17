@@ -99,7 +99,7 @@ function append(file, obj) {
 
 /** 宽容读:读不到当空。只给"没有也无所谓"的场景用(事件/约束枚举)。 */
 function readJsonl(file) {
-  try { return parseJsonl(fs.readFileSync(file, 'utf8')); }
+  try { return parseJsonl(fs.readFileSync(file, 'utf8'), file); }
   catch (e) {
     if (e.code === 'ENOENT') return [];
     throw new Error(`账本读取失败(${file}: ${e.code || e.message}),fail-closed`);
@@ -110,10 +110,25 @@ function readJsonl(file) {
  *  currentStatus 返回 null,claimDelivery 于是放行,**唯一的防重复投递闸直接 fail-open**
  *  (实测:已有 success 的账本 chmod 200 后仍返回 claimed:true)。
  *  现在只有 ENOENT(还没开张)算空,其余原样抛给调用方。 */
-function parseJsonl(raw) {
-  return raw.split('\n').filter(Boolean)
-    .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
+function parseJsonl(raw, file) {
+  // 【修】原来坏行 map 成 null 再 filter 掉 —— 账本里留下一条**截断的 success 行**时,
+  // currentStatus 返回 null,认领随之放行(实测 claimed:true)。读失败已经 fail-closed 了,
+  // 解析失败同理:那是"这里本来有条记录,但我读不懂",不是"没有记录"。
+  // 唯一容忍:文件**不以换行结尾**时的最后一行(append 的固有竞态,下次写会补全)。
+  const endsClean = raw.endsWith('\n');
+  const lines = raw.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    try { out.push(JSON.parse(lines[i])); }
+    catch {
+      if (!endsClean && i === lines.length - 1) continue;    // 半截写入,放过
+      throw new Error(`账本第 ${i + 1} 行损坏(${file || '?'}),fail-closed —— `
+        + `修好或删掉这一行再跑,别让"读不懂"被当成"没有记录"`);
+    }
+  }
+  return out;
 }
 
 /** 当前态投影:state.jsonl 里该域最后一行(写入端有守卫,投影即终态)。 */
@@ -406,52 +421,57 @@ export function saveRecipe(domain, recipe, status, notes) {
  *  用在两处:saveRecipe 的整文件覆写、claimDelivery 的"查当前态→追加认领行"。
  *  后者是防重复投递的核心闸,查与写必须原子。函数声明有提升,调用点在定义之前无碍。 */
 export function withFileLock(target, fn, waitMs = 8000) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });   // 【修】新 DIR 首次用会 ENOENT
+  fs.mkdirSync(path.dirname(target), { recursive: true });   // 新 DIR 首次用会 ENOENT
   const lock = `${target}.lock`;
   const t0 = Date.now();
+  const token = `${process.pid}-${crypto.randomUUID()}`;
   for (;;) {
-    let token;
     try {
-      token = `${process.pid}-${crypto.randomUUID()}`;
-      const fd = fs.openSync(lock, 'wx');       // O_CREAT|O_EXCL
-      fs.writeSync(fd, `${token} ${nowUtc()}\n`);
+      const fd = fs.openSync(lock, 'wx');                    // O_CREAT|O_EXCL
+      fs.writeSync(fd, `${token} ${process.pid} ${nowUtc()}\n`);
       fs.closeSync(fd);
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      // 【修】陈旧接管原来是直接 unlink:两个等待者可能都判超时、都 unlink、都拿到锁。
-      // 照 creds.mjs 的手法 —— rename 成只有自己知道的名字,**改名成功的那个才算抢到**,
-      // 由它删掉墓碑;抢输的回到循环重试。
+      // 【三修】前两版都错在"只看 mtime 就接管":持锁进程被 SIGSTOP、慢 IO、机器休眠
+      // 超过 30s,另一个进程就直接把活锁偷走(实测两个 claimDelivery 都 claimed:true)。
+      // **同一个仓里的 creds.mjs 早就做对了** —— 查持锁进程是否还活着,活着就绝不偷。
+      // 这里照抄它的 acquire():pidAlive + 「rename 成私名者才算抢到」。
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) {
+        const raw = fs.readFileSync(lock, 'utf8');
+        const pid = Number((raw.trim().split(/\s+/)[1] || '').replace(/\D/g, '')) || null;
+        const stale = Date.now() - fs.statSync(lock).mtimeMs > 30_000;
+        if (stale && !(pid && pidAlive(pid))) {
           const grave = `${lock}.stale.${crypto.randomUUID()}`;
           try { fs.renameSync(lock, grave); fs.unlinkSync(grave); } catch { /* 抢输 */ }
           continue;
         }
-      } catch { continue; }                      // 锁刚被释放,下轮就能抢到
-      // 【修】调用方(agent_submit 的 upsert/claimDelivery)按 /locked|busy/ 匹配才重试,
-      // 原来的中文文案对不上 → 声明的 6 次重试实际一次都不会发生。带上英文关键词。
+      } catch { continue; }                                  // 锁刚被释放,下轮抢
       if (Date.now() - t0 > waitMs) {
-        const e = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
-        e.lockTimeout = true;
-        throw e;
+        const err = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
+        err.lockTimeout = true;
+        throw err;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
       continue;
     }
     try { return fn(); }
     finally {
-      // 【修】原来"读 token → unlink"分两步:中间锁若被陈旧接管、别人已建新锁,
-      // 这一 unlink 删的就是**别人的**锁,第三个 writer 于是能并发进来。
-      // 改成先 rename 到自己的私名(原子),确认 rename 到的内容确实是自己的再删;
-      // rename 失败(锁已不是我的/已被接管)就什么都不做。
-      const mine = `${lock}.rel.${token}`;
+      // 【三修】上一版释放时先无条件 rename,若锁已属于 B 就把 B 的锁挪走了,
+      // 空窗里 C 建的新锁还会被我的"恢复 rename"覆盖(Codex 实测)。
+      // 回到 creds.mjs 的做法:**读一次,确认是自己的才 unlink**。
+      // 残余竞态(自己卡死超过 30s 且被判定进程已死)已由上面的存活检查堵住 ——
+      // 只有真死掉的进程的锁才会被偷,而死进程不会再走到这里。
       try {
-        fs.renameSync(lock, mine);
-        if (fs.readFileSync(mine, 'utf8').split(' ')[0] === token) fs.unlinkSync(mine);
-        else fs.renameSync(mine, lock);          // 不是我的,原样放回
-      } catch { /* 锁已被接管或已释放 */ }
+        if (fs.readFileSync(lock, 'utf8').trim().split(/\s+/)[0] === token) fs.unlinkSync(lock);
+      } catch { /* 已释放/已被接管 */ }
     }
   }
+}
+
+/** 持锁进程是否还活着(与 creds.mjs 的 pidAlive 同实现)。EPERM = 存在但不属于我们。 */
+function pidAlive(pid) {
+  try { process.kill(Number(pid), 0); return true; }
+  catch (e) { return e.code === 'EPERM'; }
 }
 
 // ---------- 终核(verify_link.mjs 用)----------
