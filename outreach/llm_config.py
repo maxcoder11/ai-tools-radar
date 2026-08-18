@@ -292,8 +292,15 @@ class _NoCrossOriginAuthRedirect(urllib.request.HTTPRedirectHandler):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
-        a, b = urlparse(req.full_url), urlparse(newurl)
-        if (a.scheme, a.hostname, a.port) != (b.scheme, b.hostname, b.port):
+        # 【修】原来直接比 (scheme, hostname, port) —— urlparse 对 https://x.com 给
+        # port=None、对 https://x.com:443 给 443,于是**同一个 origin 被判成跨源**,
+        # 合法重定向会被摘掉 Authorization、拿到 401(Node 侧没有这个差异)。
+        # 复用 origin_of:它会把默认端口显式补齐,并且和 js 侧逐字符同结果。
+        try:
+            same = origin_of(req.full_url) == origin_of(newurl)
+        except AmbiguousUrl:
+            same = False                      # 解析不了 → 按跨源处理(摘头才安全)
+        if not same:
             for h in [h for h in new.headers if h.lower() == "authorization"]:
                 del new.headers[h]
             new.unredirected_hdrs.pop("Authorization", None)

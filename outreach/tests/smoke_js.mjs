@@ -127,6 +127,32 @@ await t('锁路径损坏不忙循环', async () => {
   catch (e) { if (Date.now() - t0 > 3000) throw new Error(`耗时 ${Date.now() - t0}ms,疑似忙循环`); }
 });
 
+// 审计写失败不该让已完成的状态迁移作废(状态行已落盘,后面只是 events/人工任务善后)
+await t('审计写失败不作废状态迁移', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const dir = `${D}/auditfail`;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(`${dir}/events.jsonl`, { recursive: true });   // 把 events 变成目录 → append 必失败
+  const url = new URL('../state.mjs', import.meta.url).pathname;
+  const out = execFileSync(process.execPath, ['-e', `
+    import('${url}').then(d => {
+      let r; try { r = d.upsertSubmission({ domain: 'a.com', status: 'blocked', source: 't' }); }
+      catch { console.log('THREW'); return; }
+      console.log(r.written && d.currentStatus('a.com').status === 'blocked' ? 'OK' : 'LOST');
+    });`], { env: { ...process.env, OUTREACH_STATE_DIR: dir }, encoding: 'utf8' }).trim();
+  if (out !== 'OK') throw new Error(`events 写不进时状态迁移被作废了(${out})`);
+});
+// .gitignore 必须真的忽略 claims/ —— 误提交会让干净 checkout 拒绝投递。
+// 注意 .gitignore **不支持行尾注释**,注释写在模式后面会让整行失效(踩过)。
+await t('claims/ 确实被 gitignore', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const repo = new URL('../..', import.meta.url).pathname;
+  try {
+    execFileSync('git', ['check-ignore', '-q', 'outreach/claims/x.claim'], { cwd: repo });
+  } catch { throw new Error('outreach/claims/ 没有被 .gitignore 忽略'); }
+});
+
 const lc = await import('../llm_config.mjs');
 await t('llm_config.load', () => lc.load());
 await t('chatUrl 归一', () => { if (lc.chatUrl('https://x.com') !== 'https://x.com/v1/chat/completions') throw new Error('base URL 未归一'); });

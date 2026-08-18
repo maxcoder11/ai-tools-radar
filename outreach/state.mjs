@@ -199,6 +199,15 @@ export function recordEvent({
  * 写 state.jsonl 当前态 + 追加事件。
  * @returns {{written:boolean, from:string|null, to:string, blockedRegression:boolean}}
  */
+/** 跑一段"状态已经落盘之后"的善后逻辑(审计事件、关人工任务)。
+ *  它们失败不该让已完成的状态迁移作废 —— 只告警。
+ *  claimDelivery 早就是这个原则,upsertSubmission 之前漏了(events.jsonl 写不进时
+ *  会把成功的迁移报成失败,而且跳过 closeDeliveryAmbiguousTasks 留下过期人工任务)。 */
+function audit(dom, fn) {
+  try { fn(); }
+  catch (e) { console.error(`[${dom}] 审计/善后写入失败(状态已生效):${String(e.message).slice(0, 90)}`); }
+}
+
 export function upsertSubmission({
   domain, status, evidence = '', note = '',
   source = 'unknown', reason_code = null, force = false,
@@ -221,22 +230,26 @@ export function upsertSubmission({
   const from = guard.from;
 
   if (guard.blocked) {
-    recordEvent({
+    audit(dom, () => recordEvent({
       domain: dom, event_type: 'note', prev_status: from, status: from,
       reason_code: 'local_error', source,
       evidence: { rejected_transition: `${from} -> ${status}`, detail: ev },
-    });
+    }));
     return { written: false, from, to: from, blockedRegression: true };
   }
 
-  recordEvent({
+  // 【修】状态行**已经落盘**了,后面这些都是审计与善后。原来它们裸跑:
+  // events.jsonl 写不进(磁盘满/权限)就会抛出去 —— 调用方以为"写失败了"
+  // (其实成功了),而 closeDeliveryAmbiguousTasks 也被跳过,留下过期的人工任务。
+  // claimDelivery 早就按这个原则处理了(审计失败不让已成立的认领作废),这里跟上。
+  audit(dom, () => recordEvent({
     domain: dom,
     event_type: from === status ? 'attempt_end' : 'status_change',
     prev_status: from, status, reason_code, source,
     evidence: { evidence: ev, note: nt },
-  });
-  // 状态升级到确认投达时,关闭遗留的 ambiguous 人工任务(同事务语义 → 同一写路径内)
-  closeDeliveryAmbiguousTasks(dom, status);
+  }));
+  // 状态升级到确认投达时,关闭遗留的 ambiguous 人工任务
+  audit(dom, () => closeDeliveryAmbiguousTasks(dom, status));
   return { written: true, from, to: status, blockedRegression: false };
 }
 

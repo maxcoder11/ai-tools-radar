@@ -6,6 +6,8 @@ outreach/my_site.json
 outreach/llm.json
 outreach/*.tmp.*
 outreach/*.lock
+# 认领标记(claimDelivery 的 O_EXCL 闸)。误提交会让干净 checkout 拒绝投递
+outreach/claims/
 outreach/state.jsonl
 outreach/worklist.jsonl
 outreach/kit.json

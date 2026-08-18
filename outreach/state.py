@@ -275,6 +275,14 @@ def release_claim(domain):
         return False
 
 
+def _audit(dom, fn):
+    """跑一段"状态已经落盘之后"的善后逻辑。失败只告警,不让已完成的迁移作废。"""
+    try:
+        fn()
+    except Exception as e:
+        print(f"[{dom}] 审计写入失败(状态已生效):{str(e)[:90]}", file=__import__("sys").stderr)
+
+
 def upsert_submission(domain, status, evidence="", note="",
                       source="unknown", reason_code=None, force=False):
     """写 state.jsonl 当前态 + 追加事件。
@@ -298,13 +306,15 @@ def upsert_submission(domain, status, evidence="", note="",
 
     frm, blocked = with_file_lock(STATE_FILE, _txn)
     if blocked:
-        record_event(dom, "note", prev_status=frm, status=frm,
-                     reason_code="local_error", source=source,
-                     evidence={"rejected_transition": f"{frm} -> {status}", "detail": ev})
+        _audit(dom, lambda: record_event(
+            dom, "note", prev_status=frm, status=frm,
+            reason_code="local_error", source=source,
+            evidence={"rejected_transition": f"{frm} -> {status}", "detail": ev}))
         return {"written": False, "from": frm, "to": frm, "blockedRegression": True}
-    record_event(dom, "attempt_end" if frm == status else "status_change",
+    # 状态行已经落盘;后面是审计,失败不该让已完成的迁移作废(见 state.mjs 的 audit)
+    _audit(dom, lambda: record_event(dom, "attempt_end" if frm == status else "status_change",
                  prev_status=frm, status=status, reason_code=reason_code,
-                 source=source, evidence={"evidence": ev, "note": nt})
+                 source=source, evidence={"evidence": ev, "note": nt}))
     return {"written": True, "from": frm, "to": status, "blockedRegression": False}
 
 

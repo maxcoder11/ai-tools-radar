@@ -19,7 +19,25 @@
 | R11 | Claude | **换掉锁的设计**(不再打第五个补丁)+ 其余全修 |
 | R12 | Codex 六审 | 3 P1 + 1 P2,**全部落在 R11 新引入的认领标记设计上** |
 | R13 | Claude | 全修 + 补进冒烟 |
-| R14 | Claude 自查 | 交给下一轮之前自己再攻一遍,**发现 R13 的修复不完整** ← **本文档写的是这之后的状态** |
+| R14 | Claude 自查 | 交给下一轮之前自己再攻一遍,**发现 R13 的修复不完整** |
+| R15 | 用户 | 指出 guidance 把最危险的动作(把 ambiguous 放回池)写成了标准流程 |
+| R16 | Codex 七审 | 3 P2 |
+| R17 | Claude | 全修 ← **本文档写的是这之后的状态** |
+
+### R16(七审)的 3 条 P2 —— 已修
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `state.mjs` / `state.py` `upsertSubmission` | 状态行**已经落盘**之后,`recordEvent` 裸跑:events.jsonl 写不进(磁盘满/权限)就抛出去 —— 调用方以为写失败了(其实成功了),`closeDeliveryAmbiguousTasks` 也被跳过、留下过期人工任务。`claimDelivery` 早就按"审计失败不让已成立的结果作废"处理了,这里没跟上 | 抽出 `audit()`/`_audit()`,善后逻辑失败只告警 |
+| `.gitignore` | `outreach/claims/` 没被忽略 → 正常运行就污染工作区;误提交后干净 checkout 会因残留标记**拒绝投递** | 加上。⚠️ 踩到一个坑:**`.gitignore` 不支持行尾注释**,注释写在模式后面会让整行失效(第一版就是这么写的,`git check-ignore` 当场证伪) |
+| `llm_config.py` 重定向处理 | 直接比 `(scheme, hostname, port)` —— urlparse 对 `https://x.com` 给 `port=None`、对 `https://x.com:443` 给 `443`,**同一个 origin 被判成跨源**,合法重定向被摘掉 Authorization 拿 401(Node 侧无此差异) | 复用 `origin_of`(默认端口显式补齐,且与 js 逐字符同结果) |
+
+**冒烟当场抓到我自己的一个错误**:插 `audit()` 时锚点写错(`// ---- 主写入口 ----` 实际是 10 个短横),
+`str.replace` 静默没生效 —— 9 条断言立刻 `ReferenceError: audit is not defined`。
+上一次同类问题(误删 6 个函数)是靠跑基准偶然发现的,这次是测试直接挡下。
+
+新增断言:审计写失败不作废状态迁移(py/js 各一,用把 `events.jsonl` 换成目录来制造失败)、
+`claims/` 确实被 gitignore(直接调 `git check-ignore`)、7 组重定向同源判定。
 
 ### R14(自查)—— 把"逐个状态列举"换成消灭这一类
 

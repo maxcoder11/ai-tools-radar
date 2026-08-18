@@ -46,7 +46,11 @@ def _run(cmd, env):
     r = subprocess.run(cmd, env=base, capture_output=True, text=True, cwd=OUTREACH)
     if r.returncode != 0:
         raise AssertionError(f"{cmd[0]} 退出码 {r.returncode}:{(r.stderr or '')[:400]}")
-    return json.loads(r.stdout)
+    out = r.stdout.strip()
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return out                     # 纯文本用例(如 SAME/DIFF)
 
 
 def cases(tmp):
@@ -132,6 +136,31 @@ def cases(tmp):
     ]
 
 
+def redirect_origin_cases():
+    """跨源重定向摘 Authorization 的判据,py 与 js 必须同口径。
+    曾经 py 用 (scheme, hostname, port) 裸比 —— https://x.com 与 https://x.com:443
+    被判成跨源,合法重定向被摘头拿 401。"""
+    PAIRS = [("https://x.com/v1", "https://x.com:443/v1", True),
+             ("https://x.com:443/v1", "https://x.com/v1", True),
+             ("http://x.com/v1", "http://x.com:80/v1", True),
+             ("https://x.com/v1", "https://x.com/v2", True),
+             ("https://x.com/v1", "https://evil.com/v1", False),
+             ("https://x.com/v1", "http://x.com/v1", False),
+             ("https://x.com/v1", "https://x.com:8443/v1", False)]
+    env = {"OUTREACH_STATE_DIR": tempfile.mkdtemp()}
+    bad = []
+    for a, b, want_same in PAIRS:
+        code = ("import llm_config as c;"
+                f"print('SAME' if c.origin_of({a!r})==c.origin_of({b!r}) else 'DIFF')")
+        got = _run([sys.executable, "-c", code], env)
+        same = got == "SAME" if isinstance(got, str) else None
+        ok = same is want_same
+        if not ok:
+            bad.append(f"{a} vs {b}")
+        print(f"{'✅' if ok else '❌'} 重定向同源判定 {a} vs {b} → {'同源' if same else '跨源'}")
+    return bad
+
+
 def shared_constants():
     """py/js 共享常量对拍。两边是两份实现、共用同一个账本与 claims/ 目录,
     常量一旦分叉就是"一边认为该拒、另一边放行"。手工对齐必须有对拍兜着。"""
@@ -168,7 +197,9 @@ def main():
         n = len(cases(tmp))
     print()
     bad += shared_constants()
-    print(f"\n{n} 个配置用例 + 7 组共享常量,不一致 {len(bad)} 个" + (f":{bad}" if bad else ""))
+    print()
+    bad += redirect_origin_cases()
+    print(f"\n{n} 个配置用例 + 7 组共享常量 + 7 组重定向同源,不一致 {len(bad)} 个" + (f":{bad}" if bad else ""))
     return 1 if bad else 0
 
 

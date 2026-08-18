@@ -41,6 +41,25 @@ t("llm_config.mask",         lambda: llm_config.mask("sk-abcdefghijklmn"))
 t("read_otp._matches",       lambda: read_otp._matches("a.com", "x@a.com", "s"))
 t("check_llm.probe(离线)",    lambda: check_llm.probe("http://127.0.0.1:1/v1/chat/completions", "k", "m"))
 
+# 审计写失败不该让已完成的状态迁移作废(js 侧有同名断言,py 侧不能少)
+def _audit_fail_keeps_state():
+    import json as _json
+    import subprocess as _sp
+    import tempfile as _tf
+    d = _tf.mkdtemp()
+    os.makedirs(os.path.join(d, "events.jsonl"), exist_ok=True)   # events 变目录 → 写必失败
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import sys;sys.path.insert(0,%r);import state;"
+            "r=state.upsert_submission('a.com','blocked',source='t');"
+            "print('OK' if r['written'] and state.current_status('a.com')['status']=='blocked' else 'LOST')" % here)
+    out = _sp.run([sys.executable, "-c", code], env={**os.environ, "OUTREACH_STATE_DIR": d},
+                  capture_output=True, text=True)
+    got = (out.stdout or "").strip()
+    if got != "OK":
+        raise AssertionError(f"events 写不进时状态迁移被作废了(stdout={got!r} stderr={(out.stderr or '')[:120]})")
+
+t("审计写失败不作废状态迁移", _audit_fail_keeps_state)
+
 bad = [r for r in res if not r[0]]
 for good, name, err in res:
     if not good:
