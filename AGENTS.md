@@ -1,6 +1,9 @@
 # AGENTS.md — 给 AI agent 的操作手册
 
-把这个项目丢给 AI 时，读这个文件就够了。
+**v1.0.0**（变更见 [CHANGELOG.md](CHANGELOG.md)）。把这个项目丢给 AI 时，读这个文件就够了。
+
+两块东西：`index.html` + `data/` 是数据站（成熟，直接用）；`outreach/` 是外链投放管道
+（代码经 8 轮外审，但**尚未端到端真跑过**，首次务必 `--limit 5` 小批验证）。
 
 ## 跑起来（唯一需要做的事）
 
@@ -46,6 +49,11 @@ cp identities.example.json identities.json  # persona 池
 python3 targets.py && python3 driver.py --limit 5
 ```
 
+**改 `outreach/` 任何代码，前后都跑 `bash outreach/tests/smoke.sh`**（语法 + Python 关键路径
+29 项 + Node 关键路径 47 项 + 配置 py/js 对拍 43 组 + 12 进程并发认领）。
+**"语法过 + import 过"不算回归**——这个脚本存在的原因是：曾经整段替换函数时连带删掉了
+`state.py` 的 6 个函数，语法和 import 都照样通过，`NameError` 只在真调用到那行才炸。
+
 LLM 配置收口在 `llm_config.py` / `llm_config.mjs`(两份规则逐条一致):
 **填 base URL 就行**(`LLM_BASE_URL`,不用拼 `/chat/completions`),key 用
 `LLM_API_KEY`,也认通用的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 和文件 `llm.json`;
@@ -63,6 +71,9 @@ mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读�
   往 state.jsonl 追加行：迁移守卫（投达态不许被打回 blocked/failed）就在那里，绕过去
   = 把已投达的域重新放回可重投池 = 重复提交。driver.py 的 `save_state()` 已收口到守卫，
   新加写入点照此办理
+- **防重复投递的第二道闸是 `outreach/claims/<域>.claim`**（`claimDelivery` 用 O_EXCL 原子创建，
+  内核保证只有一个创建者成功）。标记**不会自动释放**——投达即终态；确实需要放回只能人工
+  `releaseClaim(domain)`，且必须先确认那个域真的没投出去
 - 单站时间预算：`SUBMIT_MAX_MINUTES`（默认 8，driver 传 10）。看门狗触发点由
   `makeWatchdogPlan` 按 driver 的 900s 包装硬杀倒推，超过约 12 分钟会被**自动钳住**
   （启动时打一行日志说明）——想让单站跑更久，得先把 driver 的 `timeout=900` 一起抬
@@ -74,6 +85,14 @@ mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读�
   dofollow 才抬 success（offline_confirmed 连续 ≥3 次才写 failed——单次核验不判死，
   unknown 不动）；建议每周跑一次
 - LLM 端点/打码 key/代理全走环境变量或 my_site.json；私仓的任何 key/产品资料不得进本目录
+
+## 审查记录
+
+`docs/CODEX_REVIEW.md` 是 8 轮独立外审（Codex）的完整记录：逐轮 finding、修法、实测。
+新 agent 接手 `outreach/` 前值得扫一眼——里面记了两类反复出现的错法：
+「这个防御的代码路径真的会被走到吗」，以及「同一个 bug 在别处是不是已经修过了」。
+再加一条：**动手写新实现前先 grep 仓库里有没有已经写对的**（文件锁就是先有 `creds.mjs`
+写对了，我又重写了一遍错的）。
 
 ## 数据更新
 

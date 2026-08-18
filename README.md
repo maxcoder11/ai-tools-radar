@@ -1,5 +1,7 @@
 # AI 工具榜 · AI Tools Radar
 
+**v1.0.0** · 数据快照 2026-08-17 · [更新日志](CHANGELOG.md)
+
 AI 工具站增长情报库：按**真实流量数据**排名的 AI 工具目录——不是投票榜，不是广告位。
 
 An open growth-intelligence site for AI tools: real traffic estimates, growth curves, channel mix, backlink intel. Free & open, runs locally, zero dependencies.
@@ -19,7 +21,7 @@ python3 -m http.server 8899
 
 | 视图 | 内容 |
 |---|---|
-| **总榜** | 15,000+ AI 工具站，月访问量/自然搜索流量/环比增长/反链/全球排名/域名注册时间，点行展开详情抽屉（12 月流量曲线、渠道构成、头部关键词） |
+| **总榜** | 15,662 个 AI 工具站，月访问量/自然搜索流量/环比增长/反链/全球排名/域名注册时间，点行展开详情抽屉（12 月流量曲线、渠道构成、头部关键词） |
 | **增长榜** | 按流量环比增速排序——谁在起飞一眼可见 |
 | **新品雷达** | 近 90 天新注册的 AI 工具站，按域名注册时间排序 |
 | **外链库** | 12,000 个真实给出过 dofollow 外链的页面；**输入竞品域名，查它的 dofollow 来源**（已覆盖 1,360 站，每站按权重分取 top 100），总榜反链列可下载单域 CSV |
@@ -45,7 +47,23 @@ node verify_link.mjs --pending --kit kit.json              # 终核:链接真上
 
 开工准备（缺了别跑）：免费 AgentMail 账号（agent.qq.com，收验证邮件）+ `npm i -g @tencent-qqmail/agently-cli` 授权一次；OpenAI 兼容 LLM 端点（`python3 configure.py` 有界面，填 base URL 即可，**模型须支持 `response_format: json_object`**）；persona 身份。详见 `outreach/README.md`。
 
-三条红线由代码硬执行，LLM 无权越过：付费站即停 / 文案过 forbidden_claims 闸门 / 验证码不让 LLM 编答案（无 capsolver key 进人工队列）。单次核验不判死——终核连续 3 次 offline 才算掉链。
+三条红线由代码硬执行，LLM 无权越过：付费站即停 / 文案过 forbidden_claims 闸门 / 验证码不让 LLM 编答案（两个打码 key 都没配就进人工队列）。单次核验不判死——终核连续 3 次 offline 才算掉链。
+
+**防重复投递有两道独立的闸**：账本的状态迁移守卫 + `claims/<域>.claim` 的 O_EXCL 一次性标记。后者由内核保证只有一个创建者成功，不依赖任何存活检测或陈旧判断——所以"会不会重复 POST"不依赖文件锁的正确性。
+
+### 改代码前先跑这个
+
+```bash
+bash outreach/tests/smoke.sh
+```
+
+语法 / Python 关键路径 29 项 / Node 关键路径 47 项 / 配置解析 py-js 对拍 43 组 / 12 进程并发认领。**"语法过 + import 过"不算回归**——曾经整段替换函数时连带删掉了 `state.py` 的 6 个函数，语法和 import 都照样通过。
+
+## 项目状态 · Status
+
+数据站可以直接用。**`outreach/` 尚未端到端真跑过**——代码经过 8 轮独立外审（Codex）+ 多轮自审，累计修掉 90+ 条问题（P1 级 30+，外审 P1 数量收敛过程 `5→6→7→5→5→3→0→0`），但所有验证都是读代码 + 定向复现 + 冒烟，没有用真 key 对真实站点跑完整流程。
+
+首次使用请务必 `driver.py --limit 5` 小批验证，亲眼看完整个过程再放量。逐轮的 finding、修法与实测记录在 [`docs/CODEX_REVIEW.md`](docs/CODEX_REVIEW.md)，已知限制见 [CHANGELOG](CHANGELOG.md#已知限制)。
 
 ## 数据说明 · Data notes
 
@@ -60,13 +78,15 @@ node verify_link.mjs --pending --kit kit.json              # 终核:链接真上
 ## 目录结构 · Layout
 
 ```
-index.html          # 单文件站点(全部 UI 逻辑)
-data/data.json      # 站点榜单数据(15k+ 行)
-data/library.json   # 外链库(12k 页面)
-data/links/<domain>.json  # 单域 dofollow 明细(外链库按需加载)
-data/links/index.json     # 有明细的域名清单
-outreach/           # 外链投放管道(目标生成/LLM 投放代理/收信/终核)
-scripts/            # 数据聚合脚本(需要私有数据源,仅参考)
+index.html                 # 单文件站点(全部 UI 逻辑,407 行)
+data/data.json             # 站点榜单数据(15,662 行 / 11 MB)
+data/library.json          # 外链库(12,000 页面 / 3.6 MB)
+data/links/<domain>.json   # 单域 dofollow 明细(1,360 域 / 13.5 万行,按需加载)
+data/links/index.json      # 有明细的域名清单
+outreach/                  # 外链投放管道(目标生成/LLM 投放代理/收信/终核)
+outreach/tests/smoke.sh    # 关键路径冒烟 —— 改代码前后都跑它
+docs/CODEX_REVIEW.md       # 8 轮外审的完整记录(finding / 修法 / 实测)
+scripts/                   # 数据聚合脚本(需要私有数据源,仅参考)
 ```
 
 ## License
