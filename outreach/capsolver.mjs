@@ -284,11 +284,20 @@ async function pollResult2c(taskId, timeoutMs = 120000) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     await new Promise(r => setTimeout(r, 3000));
-    const r = await fetch(API2C + '/getTaskResult', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientKey: key2c(), taskId }),
-    });
-    const j = await r.json();
+    let r, j;
+    try {
+      r = await fetch(API2C + '/getTaskResult', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientKey: key2c(), taskId }),
+      });
+      j = await r.json();
+    } catch (ne) {
+      // 【修】轮询的 fetch/json 异常原来是裸 Error —— 只配 2Captcha 时,
+      // 供应商侧的网络故障会以无分类异常到达 agent,最后写成目标站 blocked。
+      const e = new Error(`2Captcha 轮询网络失败: ${ne.message}`);
+      e.infra = true;
+      throw e;
+    }
     if (j.errorId) {
       const msg = `2c getTaskResult ${j.errorCode}: ${j.errorDescription}`;
       const e = new Error(msg);

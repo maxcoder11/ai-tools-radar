@@ -380,8 +380,18 @@ function save(sec){
   b.section = sec;
   api('/api/save', b).then(r => {
     if (!r.ok) return show('m_' + sec, 'err', r.error || '保存失败');
-    ['api_key','capsolver_key','twocaptcha_key','agentmail_api_key'].forEach(i => $(i).value = '');
+    // 【修】原来无论保存哪张卡片,都清空全部 4 个密钥框,而且 render() 还会把
+    // 另一张卡片的非密钥字段(base_url/model/inbox_id)一起覆盖 —— 用户两张卡片
+    // 同时填、先存一张时,另一张没保存的内容被无提示丢掉。
+    // 现在:只清本次提交过的密钥;另一张卡片的全部输入先快照、render 后原样还原。
+    const ALL = { llm: ['base_url','api_key','model','fallbacks'],
+                  site: ['capsolver_key','twocaptcha_key','agentmail_api_key','agentmail_inbox_id'] };
+    const other = sec === 'llm' ? ALL.site : ALL.llm;
+    const snapshot = {};
+    other.forEach(i => { snapshot[i] = $(i).value; });
+    ALL[sec].filter(i => i.includes('key')).forEach(i => { $(i).value = ''; });
     render(r.state);
+    Object.entries(snapshot).forEach(([i, v]) => { $(i).value = v; });
     show('m_' + sec, 'ok', '已写入 ' + r.written.join('、') + '(权限 0600)');
   });
 }

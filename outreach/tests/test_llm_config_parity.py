@@ -108,6 +108,14 @@ def cases(tmp):
         ("origin:scheme 不同算不同", {**F, "LLM_BASE_URL": "http://fromfile.com/v1",
                                       "LLM_API_KEY": "sk-envkey12345678"}),
         ("origin:IPv6", {**E, "LLM_BASE_URL": "http://[::1]:8080/v1", "LLM_API_KEY": "sk-v6123456789"}),
+        # --- 畸形/不可解析地址:两边必须同样拒绝(R8 P1-1 / P2-8)---
+        ("畸形:反斜杠+userinfo", {**E, "LLM_BASE_URL": "https://old.com\\@new.com/v1",
+                                   "LLM_API_KEY": "sk-mal123456789"}),
+        ("畸形:userinfo", {**E, "LLM_BASE_URL": "https://a@b.com/v1", "LLM_API_KEY": "sk-mal223456789"}),
+        ("畸形:端口越界", {**E, "LLM_BASE_URL": "https://example.com:99999/v1",
+                            "LLM_API_KEY": "sk-mal323456789"}),
+        ("畸形:非 http(s)", {**E, "LLM_BASE_URL": "ftp://example.com/v1", "LLM_API_KEY": "sk-mal423456789"}),
+        ("畸形:地址里有空格", {**E, "LLM_BASE_URL": "https://exa mple.com/v1", "LLM_API_KEY": "sk-mal523456789"}),
         # --- ALLOW_SPLIT 的布尔解析与"不反向覆盖"---
         ("split=0 不该开启", {**F, "LLM_API_KEY": "sk-envkey12345678",
                               "LLM_ALLOW_SPLIT_CONFIG": "0"}),

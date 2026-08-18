@@ -76,54 +76,69 @@ LOCK_WAIT_SEC = 8
 
 
 def _pid_alive(pid):
-    """持锁进程是否还活着(与 state.mjs / creds.mjs 的 pidAlive 同实现)。"""
     try:
         os.kill(int(pid), 0)
         return True
     except PermissionError:
-        return True                 # 存在但不属于我们
+        return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+def _mono():
+    """单调时钟。墙钟会被 NTP 回拨/休眠破坏,超时上限就不成立了。"""
+    return time.monotonic()
 
 
 def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
     """跨进程排他锁。**与 state.mjs 的 withFileLock 同一把锁文件、同一套语义**。
 
-    【三修】前两版都错在"只看 mtime 就接管":持锁进程被 SIGSTOP/慢 IO/机器休眠超过
-    30s,另一个进程就把**活锁**偷走。同一个仓里的 creds.mjs 早就做对了 —— 查持锁进程
-    存活,活着绝不偷。释放也回到"读一次确认是自己的才 unlink"(上一版的
-    rename-恢复 会覆盖第三方新建的锁)。
+    【五修】两处改动,原因见 state.mjs 同名函数的注释:
+      1. 先写临时文件再 os.link() 原子发布 —— 消除"O_EXCL 先建空文件、之后才写 owner"
+         那个空窗(挂起在两步之间会被竞争者当无主锁接管);
+      2. **删掉陈旧接管** —— 它要"读 owner→判死→移走"三步,而 POSIX 没有按 inode
+         条件删除的原子操作,中间总能插进第三方(ABA)。做不对就别做:死进程留下的锁
+         改为人工清理,错误信息直接给命令。
+    "会不会重复投递"已不依赖这把锁(见 claim_delivery 的 O_EXCL 标记)。
     """
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     lock = target + ".lock"
-    t0 = time.time()
     token = f"{os.getpid()}-{uuid.uuid4()}"
+    body = f"{token} pid={os.getpid()} {now_utc()}\n"
+    t0 = _mono()
     while True:
+        tmp = f"{lock}.mk.{token}"
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(fd, f"{token} {os.getpid()} {now_utc()}\n".encode())
-            os.close(fd)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
+            with open(tmp, "w") as f:
+                f.write(body)
+            os.link(tmp, lock)              # 原子发布;已存在则 FileExistsError
+            os.unlink(tmp)
+        except FileExistsError:
             try:
-                raw = open(lock).read().split()
-                pid = int(raw[1]) if len(raw) > 1 and raw[1].isdigit() else None
-                stale = time.time() - os.stat(lock).st_mtime > LOCK_STALE_SEC
-                if stale and not (pid and _pid_alive(pid)):
-                    grave = f"{lock}.stale.{uuid.uuid4()}"
-                    try:
-                        os.rename(lock, grave)      # 改名成功的那个才有权删
-                        os.unlink(grave)
-                    except OSError:
-                        pass                        # 抢输,回到循环
-                    continue
-            except (FileNotFoundError, IndexError, ValueError):
-                continue                            # 刚被释放/内容异常,下轮重来
-            if time.time() - t0 > wait_sec:
-                raise RuntimeError(f"ledger locked: 账本锁等待超时({wait_sec}s):{lock}")
+                os.unlink(tmp)
+            except OSError:
+                pass
+            try:
+                owner = open(lock).read().strip()
+            except OSError:
+                continue                    # 刚被释放,下轮重来
+            if _mono() - t0 > wait_sec:
+                m = re.search(r"pid=(\d+)\b", owner)     # 严格解析,与 JS 侧同
+                alive = _pid_alive(m.group(1)) if m else None
+                hint = (f"  该进程已不存在 —— 是崩溃残留,确认没有别的进程在跑后删掉它:\n"
+                        f"    rm {lock}") if alive is False else \
+                       "  持有者仍在运行,等它做完;若确认是僵尸再手工删除"
+                raise RuntimeError(
+                    f"ledger locked: 账本锁等待超时({wait_sec}s)\n"
+                    f"  锁文件 {lock}\n  持有者 {owner or '(读不到)'}\n{hint}")
             time.sleep(0.05)
             continue
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise                           # 目录不可写等真故障:原样抛,别热循环
         try:
             return fn()
         finally:
@@ -165,10 +180,12 @@ def _read_jsonl(file):
         try:
             out.append(json.loads(line))
         except Exception:
-            if not ends_clean and i == len(lines) - 1:
-                continue
-            raise RuntimeError(f"账本第 {i + 1} 行损坏({file}),fail-closed —— "
-                               f"修好或删掉这一行再跑")
+            # 【五修】不再容忍"末行半截"(见 state.mjs 同处):安全读在锁内发生,
+            # 持久截断被当成"不存在"会直接放行认领。
+            raise RuntimeError(
+                f"账本第 {i + 1} 行损坏({file})"
+                f"{'' if ends_clean else ',且文件以半行结尾'},fail-closed —— "
+                f"修好或删掉这一行再跑")
     return out
 
 
@@ -221,6 +238,21 @@ def record_event(domain, event_type, prev_status=None, status=None,
     })
 
 
+def _claim_marker(dom):
+    return os.path.join(DIR, "claims", re.sub(r"[^a-z0-9.-]", "_", dom) + ".claim")
+
+
+def _release_claim_if_reopened(dom, status):
+    """状态合法离开投达态(如 email_verified 让域回池)时撤掉认领标记。
+    与 state.mjs 的 releaseClaimIfReopened 同口径 —— 两边共用同一个 claims/ 目录。"""
+    if status in DELIVERED:
+        return
+    try:
+        os.unlink(_claim_marker(dom))
+    except OSError:
+        pass
+
+
 def upsert_submission(domain, status, evidence="", note="",
                       source="unknown", reason_code=None, force=False):
     """写 state.jsonl 当前态 + 追加事件。
@@ -251,6 +283,7 @@ def upsert_submission(domain, status, evidence="", note="",
     record_event(dom, "attempt_end" if frm == status else "status_change",
                  prev_status=frm, status=status, reason_code=reason_code,
                  source=source, evidence={"evidence": ev, "note": nt})
+    _release_claim_if_reopened(dom, status)
     return {"written": True, "from": frm, "to": status, "blockedRegression": False}
 
 

@@ -121,7 +121,10 @@ export function load() {
   // Node fetch 真的连到 old.com 并带上 Authorization(实测)。**先把哨兵拦下来**。
   const rejectSentinel = (b, where) => {
     const o = originOf(b);
-    if (o.startsWith('AMBIGUOUS|') || o.startsWith('BAD|')) {
+    // 【修】原来只拦 AMBIGUOUS|/BAD|,漏了 originOf 解析失败时返回的 `?|` ——
+    // https://example.com:99999/v1 于是 js 接受、py 拒绝。改成白名单:
+    // 只有 scheme|host|port 三段且 scheme 是 http/https 才算解析成功。
+    if (!/^https?\|[^|]+\|\d+$/.test(o)) {
       throw new Error(`LLM base URL 写法有歧义或不合法,拒绝使用(来自 ${where}):${chatUrl(b)}\n`
         + `含反斜杠/空白/userinfo 的地址在 Python 与 Node 里解析成不同主机,`
         + `会把 API key 发给非预期的域。请改成规范的 https://host/v1 形式。`);

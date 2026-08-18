@@ -406,6 +406,7 @@ async function verifyDomain(pg, dom, prod) {
   let sitemapsRead = 0;
   let probedPages = 0;   // 拿到明确 HTTP 结论的页面数(渲染的 + 预筛的)
   let blockedPages = 0;  // 被挡回(非 404/410)的页面数 —— 不算证据,只用于解释判不了
+  let truncated = false;   // 候选没检查完(超预算/中途收兵)—— 只要为 true 就绝不判死
   const prefilterDeadline = Date.now() + PREFILTER_BUDGET_MS;   // 整域共享,不是每轮重置
   // 【修】光给预筛设预算不够:预筛超时后剩下的候选全进 maybe,再逐个走浏览器导航
   // (最多 8 个 × NAV_TIMEOUT 25s = 200s),40+200 仍然超过下面的 180s 单域看门狗,
@@ -444,8 +445,13 @@ async function verifyDomain(pg, dom, prod) {
     }
     for (const url of urls) {
       if (Date.now() > domainDeadline) {
+        // 【修】原来只 break,没记"候选没看完" —— sitemap 可读时结尾仍因
+        // sitemapsRead > 0 判"证据充分",在目标链接根本还没检查的情况下给出
+        // offline_confirmed(桩测证据只有 sitemaps_read=1, probed_pages=1),
+        // 连续三轮就把正常站写成 failed。截断过就**绝不判死**。
+        truncated = true;
         console.log(`  [verify] ${dom} 超单域渲染预算(${DOMAIN_BUDGET_MS / 1000}s),`
-          + `停止再开新页;已探 ${probedPages} 页、被挡 ${blockedPages} 页`);
+          + `停止再开新页;已探 ${probedPages} 页、被挡 ${blockedPages} 页 —— 本轮不判死`);
         break;
       }
       const r = await inspect(pg, url, prod);
@@ -554,15 +560,18 @@ async function verifyDomain(pg, dom, prod) {
   // 产 120 个候选 —— 一个对所有路径都回 404 的 WAF,轻松把 >=10 撑满,于是"证据充分"
   // 恒真、unknown_blocked 近乎死代码,域被一路推向 offline_confirmed → 三次 → failed。
   // 现在要求**至少真渲染看过一个页面**(证明站是活的、我们确实进得去),再谈判死。
-  const strong = sitemapsRead > 0 || (sawAnyPage && probedPages >= 10);
+  // truncated:候选没走完就收兵了,无论 sitemap 读没读到都不能说"确认不在"
+  const strong = !truncated && (sitemapsRead > 0 || (sawAnyPage && probedPages >= 10));
   return {
     result: strong ? 'offline_confirmed' : 'unknown_blocked',
     oracles_tried: tried.join(','),
     error: strong ? null
       : `证据不足以判定未上线(sitemap 读到 ${sitemapsRead} 个,探到 ${probedPages} 页,`
-        + `被挡 ${blockedPages} 页,网络错误 ${networkErrors} 次)`,
+        + `被挡 ${blockedPages} 页,网络错误 ${networkErrors} 次`
+        + `${truncated ? ',且候选未检查完(超单域预算)' : ''})`,
     evidence: { sitemaps_read: sitemapsRead, probed_pages: probedPages,
-                blocked_pages: blockedPages, network_errors: networkErrors },
+                blocked_pages: blockedPages, network_errors: networkErrors,
+                truncated },
   };
 }
 

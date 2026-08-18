@@ -123,9 +123,13 @@ function parseJsonl(raw, file) {
     if (!lines[i]) continue;
     try { out.push(JSON.parse(lines[i])); }
     catch {
-      if (!endsClean && i === lines.length - 1) continue;    // 半截写入,放过
-      throw new Error(`账本第 ${i + 1} 行损坏(${file || '?'}),fail-closed —— `
-        + `修好或删掉这一行再跑,别让"读不懂"被当成"没有记录"`);
+      // 【五修】原来容忍"文件不以换行结尾时的最后一行",理由是 append 竞态。
+      // 但账本的安全读发生在**锁内**,不会有并发 append —— 一条持久截断的
+      // success 行被当成"不存在",认领就放行了,而且新 JSON 还会拼到半行后面,
+      // 既重复投递又进一步破坏账本。持久截断必须 fail-closed,由人来修。
+      // (真正的瞬时半截只会出现在**没拿锁的读**上,那种场景本来就不该做安全判定。)
+      throw new Error(`账本第 ${i + 1} 行损坏(${file || '?'})${endsClean ? '' : ',且文件以半行结尾'}`
+        + `,fail-closed —— 修好或删掉这一行再跑,别让"读不懂"被当成"没有记录"`);
     }
   }
   return out;
@@ -218,6 +222,7 @@ export function upsertSubmission({
   });
   // 状态升级到确认投达时,关闭遗留的 ambiguous 人工任务(同事务语义 → 同一写路径内)
   closeDeliveryAmbiguousTasks(dom, status);
+  releaseClaimIfReopened(dom, status);   // 合法回池时撤认领标记(见该函数注释)
   return { written: true, from, to: status, blockedRegression: false };
 }
 
@@ -231,19 +236,40 @@ export function claimDelivery({
   const dom = canonDomain(domain);
   const ev = clean(evidence, 2000);
   const nt = clean(note, 600);
-  // 【修】原实现是无锁的"先查后追加":两个进程在 currentStatus() 与 append() 之间
-  // 交错,就会**都拿到 claimed=true** —— 实测 10 进程同时刻认领同一域,7 个都成功。
-  // 这是全系统防重复投递的**唯一**闸(只有 claimed=true 才允许对外 click/POST),
-  // 它一破,single-shot 教义就是空的。查与写必须在同一把锁内完成。
-  const { from, claimed } = withFileLock(STATE_FILE, () => {
-    const cur = currentStatus(dom);
-    const f = cur ? cur.status : null;
-    if (f && DELIVERED.has(f)) return { from: f, claimed: false };
-    append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
-    return { from: f, claimed: true };
-  });
-  if (!claimed) return { claimed: false, from, to: from };
 
+  // 【五修·改设计】前四轮都在给"文件锁"打补丁,每轮都被击穿(陈旧接管的 ABA、
+  // 创建与写 owner 之间的空文件窗口……)。根因是:**POSIX 没有"按 inode 条件删除"
+  // 的原子操作**,纯文件锁的陈旧接管做不对 —— 再打第五个补丁也一样。
+  //
+  // 换设计:认领的语义本来就不是"临界区",而是**一个域一生只认领一次**
+  // (delivery_ambiguous 永不自动重投,只能人工裁决)。这正好是 O_EXCL 建文件的语义:
+  // 内核保证只有一个创建者成功,不需要任何存活检测、租约或陈旧判断。
+  //
+  // 于是"会不会重复 POST"这件事**不再依赖锁的正确性**。下面的 withFileLock 仍用于
+  // 状态投影的读改写,但它即使出现竞态,最坏也只是丢一次守卫判定,不会造成重复投递。
+  const claims = path.join(DIR, 'claims');
+  fs.mkdirSync(claims, { recursive: true });
+  const marker = path.join(claims, `${dom.replace(/[^a-z0-9.-]/g, '_')}.claim`);
+
+  // 兜底:老账本里可能已经是投达态但没有标记(标记是本版新增的)。补一个,并拒绝。
+  const cur = currentStatus(dom);
+  const from = cur ? cur.status : null;
+  if (from && DELIVERED.has(from)) {
+    try { fs.writeFileSync(marker, `${from} ${nowUtc()}\n`, { flag: 'wx' }); } catch {}
+    return { claimed: false, from, to: from };
+  }
+
+  try {
+    fs.writeFileSync(marker, `${process.pid} ${source} ${nowUtc()}\n`, { flag: 'wx' });
+  } catch (e) {
+    if (e.code === 'EEXIST') return { claimed: false, from, to: from };  // 已被认领
+    throw e;                                                              // 建不了 = fail-closed
+  }
+
+  // 标记已归我 —— 现在才写账本行(顺序要紧:先拿闸再落账)
+  withFileLock(STATE_FILE, () => {
+    append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
+  });
   recordEvent({
     domain: dom,
     event_type: from === 'delivery_ambiguous' ? 'attempt_end' : 'status_change',
@@ -251,6 +277,19 @@ export function claimDelivery({
     evidence: { evidence: ev, note: nt },
   });
   return { claimed: true, from, to: 'delivery_ambiguous' };
+}
+
+/** 认领标记的路径(与 claimDelivery 同一套命名)。 */
+function claimMarker(dom) {
+  return path.join(DIR, 'claims', `${dom.replace(/[^a-z0-9.-]/g, '_')}.claim`);
+}
+
+/** 状态合法地离开投达态时(如 email_verified 让域回池)必须撤掉认领标记,
+ *  否则下一轮 agent 会被自己上一轮的标记挡住,再也投不出去。
+ *  这是**唯一**撤标记的地方:一处明确的写,不是竞态。 */
+function releaseClaimIfReopened(dom, status) {
+  if (DELIVERED.has(status)) return;
+  try { fs.unlinkSync(claimMarker(dom)); } catch { /* 本来就没有 */ }
 }
 
 // ---------- 人工任务(append 事件流,读取折叠)----------
@@ -421,33 +460,56 @@ export function saveRecipe(domain, recipe, status, notes) {
  *  用在两处:saveRecipe 的整文件覆写、claimDelivery 的"查当前态→追加认领行"。
  *  后者是防重复投递的核心闸,查与写必须原子。函数声明有提升,调用点在定义之前无碍。 */
 export function withFileLock(target, fn, waitMs = 8000) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });   // 新 DIR 首次用会 ENOENT
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   const lock = `${target}.lock`;
-  const t0 = Date.now();
   const token = `${process.pid}-${crypto.randomUUID()}`;
+  const body = `${token} pid=${process.pid} ${nowUtc()}\n`;
+  const t0 = monoMs();
   for (;;) {
+    // 【五修】原来 O_EXCL 先公开一个**零字节**文件、之后才写 owner —— 进程若在这两步
+    // 之间被挂起超过陈旧阈值,竞争者读到"没有 PID",就当无主锁接管了(py/py、js/js、
+    // py/js、js/py 四组实测峰值都是 2)。改成:先把内容写进临时文件,再用 link()
+    // **原子地**发布到锁名上 —— 锁文件一出现就是完整的,不存在空窗。
+    const tmp = `${lock}.mk.${token}`;
     try {
-      const fd = fs.openSync(lock, 'wx');                    // O_CREAT|O_EXCL
-      fs.writeSync(fd, `${token} ${process.pid} ${nowUtc()}\n`);
-      fs.closeSync(fd);
+      fs.writeFileSync(tmp, body, { mode: 0o600 });
+      fs.linkSync(tmp, lock);            // 原子:已存在则 EEXIST
+      fs.unlinkSync(tmp);
     } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
       if (e.code !== 'EEXIST') throw e;
-      // 【三修】前两版都错在"只看 mtime 就接管":持锁进程被 SIGSTOP、慢 IO、机器休眠
-      // 超过 30s,另一个进程就直接把活锁偷走(实测两个 claimDelivery 都 claimed:true)。
-      // **同一个仓里的 creds.mjs 早就做对了** —— 查持锁进程是否还活着,活着就绝不偷。
-      // 这里照抄它的 acquire():pidAlive + 「rename 成私名者才算抢到」。
-      try {
-        const raw = fs.readFileSync(lock, 'utf8');
-        const pid = Number((raw.trim().split(/\s+/)[1] || '').replace(/\D/g, '')) || null;
-        const stale = Date.now() - fs.statSync(lock).mtimeMs > 30_000;
-        if (stale && !(pid && pidAlive(pid))) {
-          const grave = `${lock}.stale.${crypto.randomUUID()}`;
-          try { fs.renameSync(lock, grave); fs.unlinkSync(grave); } catch { /* 抢输 */ }
-          continue;
+
+      // 【五修·去掉做不对的东西】陈旧接管已删除。
+      // 接管必须"读 owner → 判死 → 移走",而 POSIX 没有按 inode 条件删除的原子操作,
+      // 三步之间总能插进第三方(ABA):B 读到死锁、暂停,C 接管建新锁,B 恢复后
+      // 移走的是 C 的活锁 —— 四轮补丁都栽在这。**做不对就别做**:
+      // 死进程留下的锁现在需要人工清理(错误信息里直接给命令),
+      // 而"会不会重复投递"已经不依赖这把锁了(见 claimDelivery 的 O_EXCL 标记)。
+      // 【修】原来这里是裸 catch { continue } —— 锁路径若是目录(EISDIR)等真故障,
+      // 会绕过下面的 timeout 与 50ms 退避,变成同步热循环把 CPU 打满;
+      // 而 Python 侧同样情况直接抛 IsADirectoryError,两边行为也不等价。
+      // 现在:ENOENT(刚被释放)才重试,其余原样抛;重试也走统一的退避与超时。
+      let owner = '';
+      try { owner = fs.readFileSync(lock, 'utf8').trim(); }
+      catch (re) {
+        if (re.code !== 'ENOENT') throw re;
+        if (monoMs() - t0 > waitMs) {
+          const err = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
+          err.lockTimeout = true;
+          throw err;
         }
-      } catch { continue; }                                  // 锁刚被释放,下轮抢
-      if (Date.now() - t0 > waitMs) {
-        const err = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        continue;
+      }
+      if (monoMs() - t0 > waitMs) {
+        const pid = /pid=(\d+)\b/.exec(owner);      // 严格解析,不做模糊匹配
+        const alive = pid ? pidAlive(pid[1]) : null;
+        const err = new Error(
+          `ledger locked: 账本锁等待超时(${waitMs}ms)\n`
+          + `  锁文件 ${lock}\n  持有者 ${owner || '(读不到)'}\n`
+          + (alive === false
+            ? `  该进程已不存在 —— 是崩溃残留,确认没有别的进程在跑后删掉它:\n    rm ${lock}`
+            : `  持有者仍在运行,等它做完;若确认是僵尸再手工删除`));
         err.lockTimeout = true;
         throw err;
       }
@@ -456,16 +518,19 @@ export function withFileLock(target, fn, waitMs = 8000) {
     }
     try { return fn(); }
     finally {
-      // 【三修】上一版释放时先无条件 rename,若锁已属于 B 就把 B 的锁挪走了,
-      // 空窗里 C 建的新锁还会被我的"恢复 rename"覆盖(Codex 实测)。
-      // 回到 creds.mjs 的做法:**读一次,确认是自己的才 unlink**。
-      // 残余竞态(自己卡死超过 30s 且被判定进程已死)已由上面的存活检查堵住 ——
-      // 只有真死掉的进程的锁才会被偷,而死进程不会再走到这里。
+      // 读一次,确认是自己的才删(与 creds.mjs 同)。既然没有接管,锁在我手上期间
+      // 不可能变成别人的 —— 这一步不再有 ABA。
       try {
         if (fs.readFileSync(lock, 'utf8').trim().split(/\s+/)[0] === token) fs.unlinkSync(lock);
-      } catch { /* 已释放/已被接管 */ }
+      } catch { /* 已释放 */ }
     }
   }
+}
+
+/** 单调时钟。墙钟会被 NTP 回拨/机器休眠破坏,超时上限就不成立了。 */
+function monoMs() {
+  const [s_, ns] = process.hrtime();
+  return s_ * 1000 + ns / 1e6;
 }
 
 /** 持锁进程是否还活着(与 creds.mjs 的 pidAlive 同实现)。EPERM = 存在但不属于我们。 */

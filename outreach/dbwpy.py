@@ -285,7 +285,13 @@ def migrate_domain_key(product_id=DEFAULT_PRODUCT, domain=None):
         return (domain, "invalid")
     if canon == domain:
         return (canon, "clean")
-    if st.current_status(canon) is not None:
+    # 【修】current_status 现在会**按 canon 归一行侧**,于是仅有一条 www.Example.com
+    # 的账本里,查 example.com 会命中它自己 —— 旧写法据此判"canon 目标已被另一行占用"
+    # 返回 conflict,验证邮件写回被错误转人工。真正的冲突是"存在一条**键就是 canon**
+    # 的行",要按原始 src 精确比,不能用归一后的查询。
+    rows = st._read_jsonl(st.STATE_FILE)
+    has_exact_canon_row = any(r.get("src") == canon for r in rows)
+    if has_exact_canon_row:
         return (canon, "conflict")
     return (canon, "clean")
 

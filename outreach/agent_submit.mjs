@@ -1012,11 +1012,13 @@ async function actImpl(pg, a, dom) {
     case 'captcha_turnstile': {
       if (!cs.hasKey()) {
         // 没配打码 key:不硬刚。转人工队列并终态 manual(driver 不再自动重投)。
-        await queueForHuman(dom, 'captcha_turnstile',
+        const _q = queueForHuman(dom, 'captcha_turnstile',
           `请在 ${dom} 页面里过 Turnstile 人机验证再提交(字段已预填)`);
         const e = new Error('有 Turnstile 验证码但 my_site.json 未配 capsolver_key');
         e.noSolver = true;
-        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
+        // 【修】原来无条件置 true,忽略返回值 —— human_tasks 写失败但状态账本可写时,
+        // 顶层会永久写 manual 而人工队列里根本没有这条任务。按真实结果传。
+        e.queued = _q;
         throw e;
       }
       const key = await findSitekey(pg);
@@ -1046,10 +1048,13 @@ async function actImpl(pg, a, dom) {
       // CapSolver 只接受 Windows Chrome UA,macOS UA 会被 ERROR_INVALID_TASK_DATA 拒
       // 用与浏览器**完全相同**的 UA 解题 —— cf_clearance 与 UA 绑定,不一致就作废
       if (!cs.hasKey()) {
-        await queueForHuman(dom, 'cf_challenge',
+        const _q = queueForHuman(dom, 'cf_challenge',
           `请在 ${dom} 页面里过 Cloudflare 挑战页再提交(字段已预填)`);
         const e = new Error('有 Cloudflare 挑战页但 my_site.json 未配 capsolver_key');
         e.noSolver = true;
+        // 【修】原来这个分支既没置 queued(成功入队后顶层还会再建一条泛化任务),
+        // 也没看返回值。按真实结果传。
+        e.queued = _q;
         throw e;
       }
       const ua = STEALTH_UA;
@@ -1107,12 +1112,13 @@ async function actImpl(pg, a, dom) {
       // 现在:候选全收集 → 只留长度正好 40 的 → 按可信度排序。
       // 提取函数本体(含幻影 key 的 base64 过滤)在 wall_detect.js:浏览器侧纯函数,pg.evaluate 序列化执行。
       if (!cs.hasKey()) {
-        await queueForHuman(dom, 'captcha_recaptcha',
+        const _q = queueForHuman(dom, 'captcha_recaptcha',
           `请在 ${dom} 页面里过 reCAPTCHA 人机验证再提交(字段已预填)`);
         const e = new Error('有 reCAPTCHA 验证码但 my_site.json 未配 capsolver_key');
         e.noSolver = true;
-        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
-        e.queued = true;          // 上面已按具体 blocker 入队,顶层别再建一条
+        // 【修】原来无条件置 true,忽略返回值 —— human_tasks 写失败但状态账本可写时,
+        // 顶层会永久写 manual 而人工队列里根本没有这条任务。按真实结果传。
+        e.queued = _q;
         throw e;
       }
       const sitekey = await pg.evaluate(wd.extractRecaptchaSitekey);
