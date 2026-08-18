@@ -90,7 +90,10 @@ def _mono():
     return time.monotonic()
 
 
-LOCK_HARD_SEC = 120     # 不管什么原因,超过它一律接管 —— 被遗弃的锁自动回收,不需要人工 rm
+# 不管什么原因(pid 被复用/挂死/owner 读不出)超过它一律接管 —— 被遗弃的锁自动回收,
+# 不需要人工 rm。取值依据见 state.mjs 的 LOCK_HARD_MS 注释(实测:100 万行账本的
+# 临界区也只要 4 秒,余量 150 倍)。两边必须一致。
+LOCK_HARD_SEC = 600
 
 
 def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
@@ -152,6 +155,94 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
                         os.unlink(lock)
             except Exception:
                 pass
+
+
+def _append(file, obj):
+    os.makedirs(DIR, exist_ok=True)
+    with open(file, "a") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl(file):
+    """【修】原来只 catch FileNotFoundError 之外还有个隐患:权限/IO 错会冒到调用方,
+    但调用方(current_status)没接 —— 与 JS 侧对齐:ENOENT 算空,其余原样抛,
+    绝不把"读不到"当成"没有记录"(那会让认领闸 fail-open)。"""
+    try:
+        with open(file) as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise RuntimeError(f"账本读取失败({file}: {e.strerror}),fail-closed")
+    # 【修】坏行原来静默跳过 —— 截断的 success 行会让 current_status 返回 None、
+    # 认领随之放行。与 JS 侧同口径:只容忍"文件不以换行结尾"时的最后一行。
+    ends_clean = raw.endswith("\n")
+    lines = raw.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    out = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            # 【五修】不再容忍"末行半截"(见 state.mjs 同处):安全读在锁内发生,
+            # 持久截断被当成"不存在"会直接放行认领。
+            raise RuntimeError(
+                f"账本第 {i + 1} 行损坏({file})"
+                f"{'' if ends_clean else ',且文件以半行结尾'},fail-closed —— "
+                f"修好或删掉这一行再跑")
+    return out
+
+
+def _row_key(src):
+    """账本行的键归一(与 state.mjs 的 rowKey 同口径)。历史行不会自动迁移。"""
+    try:
+        return canon_domain(src)
+    except ValueError:
+        return str(src or "").lower()
+
+
+def current_status(domain):
+    """当前态投影:state.jsonl 里该域最后一行。
+
+    【修】原来 `r.get("src") == dom`:查询侧 canon 了、行侧没有 —— 账本里躺着
+    www.Example.com/success 时返回 None,认领闸随之放行。两侧都归一。
+    """
+    dom = _row_key(domain)
+    cur = None
+    for r in _read_jsonl(STATE_FILE):
+        if _row_key(r.get("src")) == dom:
+            cur = r
+    return cur
+
+
+def _blocks_transition(frm, status, force, reason_code):
+    """显式迁移规则(与生产 dbw.js blocksTransition 逐条对齐)。"""
+    if not frm or force or reason_code in AUTHORITATIVE_REASONS:
+        return False
+    if frm == "delivery_ambiguous":
+        return status != "delivery_ambiguous" and status not in AMBIGUOUS_UPGRADES
+    if frm in DELIVERED and status in REGRESSIVE:
+        return True
+    return frm in DELIVERED and status == "delivery_ambiguous"
+
+
+def record_event(domain, event_type, prev_status=None, status=None,
+                 reason_code=None, source="unknown", evidence=None):
+    try:
+        dom = canon_domain(domain)
+    except ValueError:
+        dom = str(domain or "unknown").lower()
+    _append(EVENTS_FILE, {
+        "domain": dom, "event_type": _clean(event_type, 40),
+        "prev_status": prev_status, "status": status, "reason_code": reason_code,
+        "source": _clean(source, 40),
+        "evidence": _clean(evidence if isinstance(evidence, str) or evidence is None
+                           else json.dumps(evidence, ensure_ascii=False), 4000),
+        "ts": now_utc(),
+    })
 
 
 def _claim_marker(dom):
