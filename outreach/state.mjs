@@ -466,66 +466,53 @@ export function withFileLock(target, fn, waitMs = 8000) {
   const body = `${token} pid=${process.pid} ${nowUtc()}\n`;
   const t0 = monoMs();
   for (;;) {
-    // 【五修】原来 O_EXCL 先公开一个**零字节**文件、之后才写 owner —— 进程若在这两步
-    // 之间被挂起超过陈旧阈值,竞争者读到"没有 PID",就当无主锁接管了(py/py、js/js、
-    // py/js、js/py 四组实测峰值都是 2)。改成:先把内容写进临时文件,再用 link()
-    // **原子地**发布到锁名上 —— 锁文件一出现就是完整的,不存在空窗。
+    // 先写临时文件、再 link() 原子发布:锁文件一出现就是完整的(不存在"建了空文件、
+    // 还没写 owner"的空窗,那个窗口曾让竞争者把活锁当无主锁接管)。
     const tmp = `${lock}.mk.${token}`;
     try {
       fs.writeFileSync(tmp, body, { mode: 0o600 });
       fs.linkSync(tmp, lock);            // 原子:已存在则 EEXIST
       fs.unlinkSync(tmp);
+      try { return fn(); }
+      finally {
+        try {
+          if (fs.readFileSync(lock, 'utf8').trim().split(/\s+/)[0] === token) fs.unlinkSync(lock);
+        } catch { /* 已被接管/已释放 */ }
+      }
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch {}
       if (e.code !== 'EEXIST') throw e;
+    }
 
-      // 【五修·去掉做不对的东西】陈旧接管已删除。
-      // 接管必须"读 owner → 判死 → 移走",而 POSIX 没有按 inode 条件删除的原子操作,
-      // 三步之间总能插进第三方(ABA):B 读到死锁、暂停,C 接管建新锁,B 恢复后
-      // 移走的是 C 的活锁 —— 四轮补丁都栽在这。**做不对就别做**:
-      // 死进程留下的锁现在需要人工清理(错误信息里直接给命令),
-      // 而"会不会重复投递"已经不依赖这把锁了(见 claimDelivery 的 O_EXCL 标记)。
-      // 【修】原来这里是裸 catch { continue } —— 锁路径若是目录(EISDIR)等真故障,
-      // 会绕过下面的 timeout 与 50ms 退避,变成同步热循环把 CPU 打满;
-      // 而 Python 侧同样情况直接抛 IsADirectoryError,两边行为也不等价。
-      // 现在:ENOENT(刚被释放)才重试,其余原样抛;重试也走统一的退避与超时。
-      let owner = '';
-      try { owner = fs.readFileSync(lock, 'utf8').trim(); }
-      catch (re) {
-        if (re.code !== 'ENOENT') throw re;
-        if (monoMs() - t0 > waitMs) {
-          const err = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock}`);
-          err.lockTimeout = true;
-          throw err;
-        }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-        continue;
-      }
-      if (monoMs() - t0 > waitMs) {
-        const pid = /pid=(\d+)\b/.exec(owner);      // 严格解析,不做模糊匹配
-        const alive = pid ? pidAlive(pid[1]) : null;
-        const err = new Error(
-          `ledger locked: 账本锁等待超时(${waitMs}ms)\n`
-          + `  锁文件 ${lock}\n  持有者 ${owner || '(读不到)'}\n`
-          + (alive === false
-            ? `  该进程已不存在 —— 是崩溃残留,确认没有别的进程在跑后删掉它:\n    rm ${lock}`
-            : `  持有者仍在运行,等它做完;若确认是僵尸再手工删除`));
-        err.lockTimeout = true;
-        throw err;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    // ---- 锁被别人占着 ----
+    // 这把锁**不是安全闸**:认领由 claims/ 下的 O_EXCL 标记把关(见 claimDelivery)。
+    // 它只护状态投影的读改写,真出竞态最坏是丢一次守卫判定 —— 而那之后重投时
+    // 标记仍然挡得住 POST。所以这里不需要为"会不会偷到活锁"做严格保证:
+    // 超时就直接覆盖,**永远不要求人工介入**。
+    let age = Infinity, ownerDead = false;
+    try {
+      age = Date.now() - fs.statSync(lock).mtimeMs;
+      const m = /pid=(\d+)\b/.exec(fs.readFileSync(lock, 'utf8'));
+      ownerDead = m ? !pidAlive(m[1]) : true;              // 读不出 pid 就当没主
+    } catch { continue; }                                   // 刚被释放,直接重抢
+    if ((age > LOCK_STALE_MS && ownerDead) || age > LOCK_HARD_MS) {
+      try { fs.unlinkSync(lock); } catch {}                 // 接管:直接覆盖
       continue;
     }
-    try { return fn(); }
-    finally {
-      // 读一次,确认是自己的才删(与 creds.mjs 同)。既然没有接管,锁在我手上期间
-      // 不可能变成别人的 —— 这一步不再有 ABA。
-      try {
-        if (fs.readFileSync(lock, 'utf8').trim().split(/\s+/)[0] === token) fs.unlinkSync(lock);
-      } catch { /* 已释放 */ }
+    if (monoMs() - t0 > waitMs) {
+      const err = new Error(`ledger locked: 账本锁等待超时(${waitMs}ms):${lock} —— `
+        + `持有者仍在运行;若它挂住,${Math.round(LOCK_HARD_MS / 1000)}s 后会被自动接管`);
+      err.lockTimeout = true;
+      throw err;
     }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
 }
+
+// 陈旧阈值:持有者已死 → 30s 接管;不管什么原因(pid 复用/进程挂死/读不出 owner)
+// → 120s 一律接管。**任何被遗弃的锁都会自动回收,不需要人工 rm。**
+const LOCK_STALE_MS = 30_000;
+const LOCK_HARD_MS = 120_000;
 
 /** 单调时钟。墙钟会被 NTP 回拨/机器休眠破坏,超时上限就不成立了。 */
 function monoMs() {

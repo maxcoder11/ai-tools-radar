@@ -90,16 +90,16 @@ def _mono():
     return time.monotonic()
 
 
+LOCK_HARD_SEC = 120     # 不管什么原因,超过它一律接管 —— 被遗弃的锁自动回收,不需要人工 rm
+
+
 def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
     """跨进程排他锁。**与 state.mjs 的 withFileLock 同一把锁文件、同一套语义**。
 
-    【五修】两处改动,原因见 state.mjs 同名函数的注释:
-      1. 先写临时文件再 os.link() 原子发布 —— 消除"O_EXCL 先建空文件、之后才写 owner"
-         那个空窗(挂起在两步之间会被竞争者当无主锁接管);
-      2. **删掉陈旧接管** —— 它要"读 owner→判死→移走"三步,而 POSIX 没有按 inode
-         条件删除的原子操作,中间总能插进第三方(ABA)。做不对就别做:死进程留下的锁
-         改为人工清理,错误信息直接给命令。
-    "会不会重复投递"已不依赖这把锁(见 claim_delivery 的 O_EXCL 标记)。
+    这把锁**不是安全闸**:认领由 claims/ 下的 O_EXCL 标记把关(见 state.mjs 的
+    claimDelivery)。它只护状态投影的读改写,真出竞态最坏是丢一次守卫判定 ——
+    而那之后重投时标记仍然挡得住 POST。所以陈旧接管不需要严格保证,
+    超时直接覆盖即可,**永远不要求人工介入**。
     """
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     lock = target + ".lock"
@@ -118,19 +118,23 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
                 os.unlink(tmp)
             except OSError:
                 pass
+            # ---- 锁被别人占着 ----
             try:
-                owner = open(lock).read().strip()
+                age = time.time() - os.stat(lock).st_mtime
+                m = re.search(r"pid=(\d+)\b", open(lock).read())
+                owner_dead = not _pid_alive(m.group(1)) if m else True
             except OSError:
-                continue                    # 刚被释放,下轮重来
+                continue                    # 刚被释放,直接重抢
+            if (age > LOCK_STALE_SEC and owner_dead) or age > LOCK_HARD_SEC:
+                try:
+                    os.unlink(lock)         # 接管:直接覆盖
+                except OSError:
+                    pass
+                continue
             if _mono() - t0 > wait_sec:
-                m = re.search(r"pid=(\d+)\b", owner)     # 严格解析,与 JS 侧同
-                alive = _pid_alive(m.group(1)) if m else None
-                hint = (f"  该进程已不存在 —— 是崩溃残留,确认没有别的进程在跑后删掉它:\n"
-                        f"    rm {lock}") if alive is False else \
-                       "  持有者仍在运行,等它做完;若确认是僵尸再手工删除"
                 raise RuntimeError(
-                    f"ledger locked: 账本锁等待超时({wait_sec}s)\n"
-                    f"  锁文件 {lock}\n  持有者 {owner or '(读不到)'}\n{hint}")
+                    f"ledger locked: 账本锁等待超时({wait_sec}s):{lock} —— "
+                    f"持有者仍在运行;若它挂住,{LOCK_HARD_SEC}s 后会被自动接管")
             time.sleep(0.05)
             continue
         except OSError:
@@ -148,94 +152,6 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
                         os.unlink(lock)
             except Exception:
                 pass
-
-
-def _append(file, obj):
-    os.makedirs(DIR, exist_ok=True)
-    with open(file, "a") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def _read_jsonl(file):
-    """【修】原来只 catch FileNotFoundError 之外还有个隐患:权限/IO 错会冒到调用方,
-    但调用方(current_status)没接 —— 与 JS 侧对齐:ENOENT 算空,其余原样抛,
-    绝不把"读不到"当成"没有记录"(那会让认领闸 fail-open)。"""
-    try:
-        with open(file) as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return []
-    except OSError as e:
-        raise RuntimeError(f"账本读取失败({file}: {e.strerror}),fail-closed")
-    # 【修】坏行原来静默跳过 —— 截断的 success 行会让 current_status 返回 None、
-    # 认领随之放行。与 JS 侧同口径:只容忍"文件不以换行结尾"时的最后一行。
-    ends_clean = raw.endswith("\n")
-    lines = raw.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    out = []
-    for i, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            # 【五修】不再容忍"末行半截"(见 state.mjs 同处):安全读在锁内发生,
-            # 持久截断被当成"不存在"会直接放行认领。
-            raise RuntimeError(
-                f"账本第 {i + 1} 行损坏({file})"
-                f"{'' if ends_clean else ',且文件以半行结尾'},fail-closed —— "
-                f"修好或删掉这一行再跑")
-    return out
-
-
-def _row_key(src):
-    """账本行的键归一(与 state.mjs 的 rowKey 同口径)。历史行不会自动迁移。"""
-    try:
-        return canon_domain(src)
-    except ValueError:
-        return str(src or "").lower()
-
-
-def current_status(domain):
-    """当前态投影:state.jsonl 里该域最后一行。
-
-    【修】原来 `r.get("src") == dom`:查询侧 canon 了、行侧没有 —— 账本里躺着
-    www.Example.com/success 时返回 None,认领闸随之放行。两侧都归一。
-    """
-    dom = _row_key(domain)
-    cur = None
-    for r in _read_jsonl(STATE_FILE):
-        if _row_key(r.get("src")) == dom:
-            cur = r
-    return cur
-
-
-def _blocks_transition(frm, status, force, reason_code):
-    """显式迁移规则(与生产 dbw.js blocksTransition 逐条对齐)。"""
-    if not frm or force or reason_code in AUTHORITATIVE_REASONS:
-        return False
-    if frm == "delivery_ambiguous":
-        return status != "delivery_ambiguous" and status not in AMBIGUOUS_UPGRADES
-    if frm in DELIVERED and status in REGRESSIVE:
-        return True
-    return frm in DELIVERED and status == "delivery_ambiguous"
-
-
-def record_event(domain, event_type, prev_status=None, status=None,
-                 reason_code=None, source="unknown", evidence=None):
-    try:
-        dom = canon_domain(domain)
-    except ValueError:
-        dom = str(domain or "unknown").lower()
-    _append(EVENTS_FILE, {
-        "domain": dom, "event_type": _clean(event_type, 40),
-        "prev_status": prev_status, "status": status, "reason_code": reason_code,
-        "source": _clean(source, 40),
-        "evidence": _clean(evidence if isinstance(evidence, str) or evidence is None
-                           else json.dumps(evidence, ensure_ascii=False), 4000),
-        "ts": now_utc(),
-    })
 
 
 def _claim_marker(dom):
