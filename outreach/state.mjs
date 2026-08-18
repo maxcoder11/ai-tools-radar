@@ -42,6 +42,9 @@ export const STATUSES = new Set([
   // 开源版新增:有验证码但未配置打码 key,转人工队列(不硬刚)。
   // 非投达态、非倒退态,不参与守卫矩阵。
   'manual',
+  // 【修】py 侧 STATUSES 一直有它,js 侧没有 —— 同一个状态 Python 写得进、Node 直接
+  // 抛"未知 status",合法回池路径(sweeper 点通验证信 → email_verified)就此断在 Node 上。
+  'email_verified',
 ]);
 
 // 已经真正投出去的状态。一旦进入,辅助步骤(存 recipe、截图、自验证)出的异常
@@ -49,6 +52,18 @@ export const STATUSES = new Set([
 export const DELIVERED = new Set(['success', 'pending_review', 'emailed', 'delivery_ambiguous']);
 export const CONFIRMED_DELIVERED = new Set(['success', 'pending_review', 'emailed']);
 const REGRESSIVE = new Set(['blocked', 'failed']);
+
+// 【修】认领闸和标记生命周期原来都只看 DELIVERED,而 manual / skipped_* 同样是
+// "别再投了"的终态(driver 的 TERMINAL 里有它们)—— 结果两个洞:
+//   ① 直接跑 agent_submit 时,这些终态的域仍能被认领;
+//   ② 更要命的是 success → skipped_badge 这类**合法**迁移(mail_sweeper 收到要挂
+//      badge 的信就会写)不在 REGRESSIVE 里、守卫放行,而它一写就把标记撤了 ——
+//      一个**已经投达**的域于是变回可认领(实测复现)。
+// 所以:标记的生命周期跟着这个集合走,不跟 DELIVERED 走。
+// 可重试的只有 blocked / failed / email_verified / draft。
+export const CLAIM_BLOCKING = new Set([
+  ...DELIVERED, 'manual', 'skipped_paid', 'skipped_badge', 'skipped_fit',
+]);
 const AMBIGUOUS_UPGRADES = new Set(['success', 'pending_review', 'emailed']);
 export const AUTHORITATIVE_REASONS = new Set([
   'rejected_by_site', 'delisted', 'manual', 'mail_bounced', 'badge_required',
@@ -254,7 +269,7 @@ export function claimDelivery({
   // 兜底:老账本里可能已经是投达态但没有标记(标记是本版新增的)。补一个,并拒绝。
   const cur = currentStatus(dom);
   const from = cur ? cur.status : null;
-  if (from && DELIVERED.has(from)) {
+  if (from && CLAIM_BLOCKING.has(from)) {
     try { fs.writeFileSync(marker, `${from} ${nowUtc()}\n`, { flag: 'wx' }); } catch {}
     return { claimed: false, from, to: from };
   }
@@ -266,16 +281,29 @@ export function claimDelivery({
     throw e;                                                              // 建不了 = fail-closed
   }
 
-  // 标记已归我 —— 现在才写账本行(顺序要紧:先拿闸再落账)
-  withFileLock(STATE_FILE, () => {
-    append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
-  });
-  recordEvent({
-    domain: dom,
-    event_type: from === 'delivery_ambiguous' ? 'attempt_end' : 'status_change',
-    prev_status: from, status: 'delivery_ambiguous', reason_code, source,
-    evidence: { evidence: ev, note: nt },
-  });
+  // 标记已归我 —— 现在才写账本行(顺序要紧:先拿闸再落账)。
+  // 【修】落账失败(锁超时/磁盘满)时必须**把标记撤回**:否则闸留着、账本没记录,
+  // 这个域此后永远认领不了(实测:再认领得到 claimed:false / from:null),
+  // 而调用方看到的是抛错、以为"没投出去,下次再来"。
+  try {
+    withFileLock(STATE_FILE, () => {
+      append(STATE_FILE, { src: dom, status: 'delivery_ambiguous', note: nt || '', evidence: ev, ts: nowUtc() });
+    });
+  } catch (e) {
+    try { fs.unlinkSync(marker); } catch {}
+    throw e;                       // 闸已回滚,调用方按"没拿到认领"处理即可
+  }
+  // 事件账本是审计用的,写不进不该让已经成立的认领作废 —— 只告警,不回滚。
+  try {
+    recordEvent({
+      domain: dom,
+      event_type: from === 'delivery_ambiguous' ? 'attempt_end' : 'status_change',
+      prev_status: from, status: 'delivery_ambiguous', reason_code, source,
+      evidence: { evidence: ev, note: nt },
+    });
+  } catch (e) {
+    console.error(`[${dom}] 认领事件写入失败(认领本身有效):${String(e.message).slice(0, 80)}`);
+  }
   return { claimed: true, from, to: 'delivery_ambiguous' };
 }
 
@@ -288,7 +316,7 @@ function claimMarker(dom) {
  *  否则下一轮 agent 会被自己上一轮的标记挡住,再也投不出去。
  *  这是**唯一**撤标记的地方:一处明确的写,不是竞态。 */
 function releaseClaimIfReopened(dom, status) {
-  if (DELIVERED.has(status)) return;
+  if (CLAIM_BLOCKING.has(status)) return;   // 见 CLAIM_BLOCKING 注释:不只是 DELIVERED
   try { fs.unlinkSync(claimMarker(dom)); } catch { /* 本来就没有 */ }
 }
 
@@ -494,7 +522,14 @@ export function withFileLock(target, fn, waitMs = 8000) {
       age = Date.now() - fs.statSync(lock).mtimeMs;
       const m = /pid=(\d+)\b/.exec(fs.readFileSync(lock, 'utf8'));
       ownerDead = m ? !pidAlive(m[1]) : true;              // 读不出 pid 就当没主
-    } catch { continue; }                                   // 刚被释放,直接重抢
+    } catch (re) {
+      // 【修】原来是裸 `catch { continue }` —— 锁路径被换成目录之类时,
+      // readFileSync 每轮都抛 EISDIR,于是**绕过 timeout 与退避变成忙循环**,
+      // 只能等 driver 的 900s 外层超时(实测两边都挂死)。
+      if (re.code === 'ENOENT') { continue; }               // 刚被释放:直接重抢是对的
+      throw new Error(`账本锁不可用(${lock}: ${re.code || re.message}) —— `
+        + `它不是一个正常的锁文件,检查这个路径`);
+    }
     if ((age > LOCK_STALE_MS && ownerDead) || age > LOCK_HARD_MS) {
       try { fs.unlinkSync(lock); } catch {}                 // 接管:直接覆盖
       continue;

@@ -40,6 +40,11 @@ STATUSES = {
 DELIVERED = {"success", "pending_review", "emailed", "delivery_ambiguous"}
 CONFIRMED_DELIVERED = {"success", "pending_review", "emailed"}
 REGRESSIVE = {"blocked", "failed"}
+
+# 认领闸与标记生命周期跟着这个集合走,**不跟 DELIVERED 走**(理由见 state.mjs 同名常量:
+# manual / skipped_* 同样是"别再投了"的终态;而 success → skipped_badge 这类合法迁移
+# 一写就会撤掉标记,让已投达的域变回可认领)。可重试的只有 blocked/failed/email_verified/draft。
+CLAIM_BLOCKING = DELIVERED | {"manual", "skipped_paid", "skipped_badge", "skipped_fit"}
 AMBIGUOUS_UPGRADES = {"success", "pending_review", "emailed"}
 AUTHORITATIVE_REASONS = {
     "rejected_by_site", "delisted", "manual", "mail_bounced", "badge_required",
@@ -126,8 +131,14 @@ def with_file_lock(target, fn, wait_sec=LOCK_WAIT_SEC):
                 age = time.time() - os.stat(lock).st_mtime
                 m = re.search(r"pid=(\d+)\b", open(lock).read())
                 owner_dead = not _pid_alive(m.group(1)) if m else True
-            except OSError:
-                continue                    # 刚被释放,直接重抢
+            except FileNotFoundError:
+                continue                    # 刚被释放,直接重抢是对的
+            except OSError as re_:
+                # 【修】原来所有 OSError 都 continue —— 锁路径被换成目录时每轮抛
+                # IsADirectoryError,绕过 timeout 与退避变成忙循环(实测挂死)。
+                raise RuntimeError(
+                    f"账本锁不可用({lock}: {re_.strerror}) —— 它不是一个正常的锁文件,"
+                    f"检查这个路径")
             if (age > LOCK_STALE_SEC and owner_dead) or age > LOCK_HARD_SEC:
                 try:
                     os.unlink(lock)         # 接管:直接覆盖
@@ -250,9 +261,9 @@ def _claim_marker(dom):
 
 
 def _release_claim_if_reopened(dom, status):
-    """状态合法离开投达态(如 email_verified 让域回池)时撤掉认领标记。
+    """状态合法回到可重试(blocked/failed/email_verified/draft)时撤掉认领标记。
     与 state.mjs 的 releaseClaimIfReopened 同口径 —— 两边共用同一个 claims/ 目录。"""
-    if status in DELIVERED:
+    if status in CLAIM_BLOCKING:
         return
     try:
         os.unlink(_claim_marker(dom))

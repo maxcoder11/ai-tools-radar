@@ -42,6 +42,53 @@ await t('坏行 fail-closed', async () => {
   if (out !== 'THREW') throw new Error(`截断行没有 fail-closed(子进程输出 ${out})`);
 });
 
+// ── 认领闸的生命周期(R13 的 4 条 P1 全在这里,回归必须覆盖)──
+await t('终态一律不可再认领', () => {
+  for (const [st, dom] of [['manual','m1.com'],['skipped_paid','sp.com'],['skipped_badge','sb.com'],
+                           ['skipped_fit','sf.com'],['success','su.com'],['pending_review','pr.com'],
+                           ['emailed','em.com']]) {
+    db.upsertSubmission({ domain: dom, status: st, source: 't' });
+    if (db.claimDelivery({ domain: dom, source: 't' }).claimed) throw new Error(`${st} 竟可再认领`);
+  }
+});
+await t('可重试态仍可认领', () => {
+  for (const [st, dom] of [['blocked','b1.com'],['failed','f1.com'],['email_verified','ev.com']]) {
+    db.upsertSubmission({ domain: dom, status: st, source: 't' });
+    if (!db.claimDelivery({ domain: dom, source: 't' }).claimed) throw new Error(`${st} 该可认领`);
+  }
+});
+await t('已投达域不因 skipped_badge 复活', () => {
+  db.claimDelivery({ domain: 'sx.com', source: 'a' });
+  db.upsertSubmission({ domain: 'sx.com', status: 'success', source: 'a', reason_code: 'published' });
+  db.upsertSubmission({ domain: 'sx.com', status: 'skipped_badge', source: 'm', reason_code: 'badge_required' });
+  if (db.claimDelivery({ domain: 'sx.com', source: 'a2' }).claimed) throw new Error('已投达的域变回可认领了');
+});
+await t('email_verified 两边都认', () => db.upsertSubmission({ domain: 'ev2.com', status: 'email_verified', source: 't' }));
+// 落账失败必须把标记撤回,否则该域此后永远认领不了
+await t('写账失败 → 标记回滚', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const dir = `${D}/rollback`;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(`${dir}/state.jsonl.lock`, `tok pid=${process.pid} now\n`);   // 活进程占住锁
+  const url = new URL('../state.mjs', import.meta.url).pathname;
+  const out = execFileSync(process.execPath, ['-e', `
+    import('${url}').then(d => {
+      try { d.claimDelivery({ domain: 'x.com', source: 't' }); } catch {}
+      console.log(require('fs').existsSync('${dir}/claims/x.com.claim') ? 'LEAKED' : 'ROLLED');
+    });`], { env: { ...process.env, OUTREACH_STATE_DIR: dir }, encoding: 'utf8' }).trim();
+  if (out !== 'ROLLED') throw new Error('标记没回滚,该域将永远认领不了');
+});
+// 锁路径损坏必须抛,不能忙循环(曾经挂到 driver 的 900s 外层超时)
+await t('锁路径损坏不忙循环', async () => {
+  const fs = await import('node:fs');
+  const dir = `${D}/badlock`;
+  fs.mkdirSync(`${dir}/s.lock`, { recursive: true });         // 锁路径是目录
+  const t0 = Date.now();
+  try { db.withFileLock(`${dir}/s`, () => {}, 1000); throw new Error('竟拿到锁'); }
+  catch (e) { if (Date.now() - t0 > 3000) throw new Error(`耗时 ${Date.now() - t0}ms,疑似忙循环`); }
+});
+
 const lc = await import('../llm_config.mjs');
 await t('llm_config.load', () => lc.load());
 await t('chatUrl 归一', () => { if (lc.chatUrl('https://x.com') !== 'https://x.com/v1/chat/completions') throw new Error('base URL 未归一'); });

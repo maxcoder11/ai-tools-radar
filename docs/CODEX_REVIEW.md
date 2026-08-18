@@ -16,7 +16,20 @@
 | R8 | Codex 四审 | 5 P1 + 10 P2。**又是全对**,且 5 条 P1 里 4 条是 R7 修复自身的缺陷 |
 | R9 | Claude | 按 R8 清单全修 + 逐条实测 |
 | R10 | Codex 五审 | 5 P1 + 5 P2,**锁协议仍被击穿两条** |
-| R11 | Claude | **换掉锁的设计**(不再打第五个补丁)+ 其余全修 ← **本文档写的是这之后的状态** |
+| R11 | Claude | **换掉锁的设计**(不再打第五个补丁)+ 其余全修 |
+| R12 | Codex 六审 | 3 P1 + 1 P2,**全部落在 R11 新引入的认领标记设计上** |
+| R13 | Claude | 全修 + 补进冒烟 ← **本文档写的是这之后的状态** |
+
+### R12 的 4 条(新设计的自身缺陷)—— 已修
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `claimDelivery` | 先建标记再落账,**落账失败不回滚** → 标记留着、账本没记录,该域此后**永远认领不了**(实测再认领得到 `claimed:false / from:null`) | 落账失败时撤回标记再抛;事件账本写失败只告警(审计失败不该让已成立的认领作废) |
+| `claimDelivery` | 拒认领只看 `DELIVERED`,而 `manual`/`skipped_*` 同样是"别再投了"的终态。**更要命的是** `success → skipped_badge`(mail_sweeper 收到要挂 badge 的信就会写)不在 REGRESSIVE 里、守卫放行,一写就撤标记 → **已投达的域变回可认领**(按此路径复现) | 新增 `CLAIM_BLOCKING = DELIVERED ∪ {manual, skipped_*}`,**认领拒绝与标记生命周期都跟它走**;可重试的只有 `blocked/failed/email_verified/draft` |
+| `state.mjs` STATUSES | py 有 `email_verified`、js 没有 → 同一状态 Python 写得进、Node 抛"未知 status",合法回池路径断在 Node 上 | 补上 |
+| `withFileLock` | 锁路径被换成目录时,读 owner 抛 EISDIR 走裸 `continue` → **绕过 timeout 与退避变成忙循环**(实测把命令挂到 2 分钟超时) | 只有 ENOENT 才重抢,其余原样抛并说清"它不是一个正常的锁文件" |
+
+这 4 条已全部写进 `smoke.sh`(Node 侧 36 → 42 项),下一轮改动会被它挡住。
 
 **连续三轮外审,每轮都找出"上一轮只修了一半"。** R6 的 7 条 P1 里有 5 条属于此类:
 
