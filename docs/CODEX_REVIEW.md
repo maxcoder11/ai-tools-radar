@@ -350,6 +350,22 @@ Set 那个改动留着了(数据结构本来就该是 Set),但**不解决卡顿*
 ## 11. 复核入口(不需要真 key / 不需要网络)
 
 ```bash
+bash outreach/tests/smoke.sh                       # 一条命令跑完下面全部 ← 先跑这个
+```
+
+**为什么有这个脚本**:我曾经在整段替换 `with_file_lock` 时,连带删掉了 `state.py` 的
+6 个函数(`current_status` / `record_event` / `_read_jsonl` …)。**语法检查和 import 都照样通过** ——
+`NameError` 只在真正调用到那一行时才炸,而我当轮的"全量回归"只跑了语法和 import。
+所以:**"语法过 + import 过"不算回归**,`smoke.sh` 把每条公开路径真的执行一遍
+(py 28 项 / js 36 项 + 对拍 38 例 + 12 进程并发认领)。
+
+里面的"坏行 fail-closed"用**子进程**验(DIR 是模块加载时冻结的,同进程里测不到),
+并且我做过变异验证:把 `state.mjs` 的 throw 换成 continue,这条断言立刻变红 ——
+它不是空转。
+
+单项:
+
+```bash
 python3 outreach/tests/test_llm_config_parity.py   # 38 用例:歧义拒绝 / split 开关 / origin 归一化
 python3 outreach/llm_config.py                     # 当前解析结果(key 只显掩码)
 for f in outreach/*.mjs; do node --check $f; done
