@@ -215,6 +215,16 @@ def load():
         sources["base"] = based["name"] if based else "缺省"
         sources["key"] = "(未配置)"
         key = ""
+        # 【修】这个分支原来不校验 base —— 而 js 侧的 rejectSentinel 在无 key 时也拦。
+        # 结果:配置界面(py)把一个畸形地址显示成有效并允许保存,agent(node)运行时才拒。
+        # 校验和 key 在不在无关,提前拦住。
+        # 异常类型统一成 RuntimeError:load() 对外只有这一种失败,调用方
+        # (driver / mail_sweeper / configure)接的都是它;裸抛 AmbiguousUrl(ValueError)
+        # 会从它们的 except 里漏出去。
+        try:
+            origin_of(base)
+        except AmbiguousUrl as e:
+            raise RuntimeError(f"LLM base URL 写法有歧义,拒绝使用:{e}")
     else:
         key = winner["key"]
         sources["key"] = winner["name"]

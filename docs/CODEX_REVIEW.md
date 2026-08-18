@@ -22,7 +22,28 @@
 | R14 | Claude 自查 | 交给下一轮之前自己再攻一遍,**发现 R13 的修复不完整** |
 | R15 | 用户 | 指出 guidance 把最危险的动作(把 ambiguous 放回池)写成了标准流程 |
 | R16 | Codex 七审 | 3 P2 |
-| R17 | Claude | 全修 ← **本文档写的是这之后的状态** |
+| R17 | Claude | 全修 |
+| R18 | Codex 八审 | 报 3 条,**其中 2 条是 R17 已修的**(评审的是上一个提交);1 条新的 P3 属实 |
+| R19 | Claude | 修掉那条 P3 + 补上漏掉的整条测试分支 ← **本文档写的是这之后的状态** |
+
+### R18(八审)
+
+前两条(`recordEvent` 裸跑、`claims/` 未忽略)在 `8b937b5` 已经修掉并推送。
+判断依据不只是"我记得修过":
+- `state.mjs` 当前代码里两处 `recordEvent` 都在 `audit()` 里;
+- `git check-ignore -v outreach/claims/x.claim` 命中 `.gitignore:10`;
+- 而报告给的行号(`state.mjs:232`、`.gitignore:8`)正好对应**加注释行之前**的旧版本。
+
+第三条是真的,已修:
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `llm_config.py` 的**无 key 分支** | js 侧 `rejectSentinel` 在无 key 时也拦畸形 base,py 侧这条分支**根本不校验** → 配置界面(py)把 `https://old.com\@new.com/v1` 显示成有效并允许保存,agent(node)运行时才拒 | 无 key 分支也走 `origin_of`;并把异常统一成 `RuntimeError`(裸抛的 `AmbiguousUrl` 是 `ValueError` 子类,会从 driver / mail_sweeper / configure 的 `except RuntimeError` 里漏出去) |
+
+**为什么 43 组对拍没抓到它**:此前 38 组用例**每一组都带 key** —— 整条"无 key"分支
+从来没被覆盖过。已补 5 组(畸形地址 ×3 / 合法地址 / 全缺省),对拍 38 → 43 组。
+教训:对拍要按**分支**设计用例,不是按输入枚举 —— 我一直在变着花样喂 base URL,
+却没注意到另一个维度(key 在不在)整条没走过。
 
 ### R16(七审)的 3 条 P2 —— 已修
 

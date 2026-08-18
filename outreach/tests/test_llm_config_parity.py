@@ -128,6 +128,12 @@ def cases(tmp):
         ("split=true 放行且不反向覆盖", {**F, "LLM_BASE_URL": "https://winner.com/v1",
                                         "LLM_API_KEY": "sk-envkey12345678",
                                         "LLM_ALLOW_SPLIT_CONFIG": "true"}),
+        # --- 无 key 分支(此前 38 组用例**每组都带 key**,正好漏掉这一整条分支)---
+        ("无key:畸形地址也要拒", {**E, "LLM_BASE_URL": "https://old.com\\@new.com/v1"}),
+        ("无key:userinfo 也要拒", {**E, "LLM_BASE_URL": "https://a@b.com/v1"}),
+        ("无key:端口越界也要拒", {**E, "LLM_BASE_URL": "https://example.com:99999/v1"}),
+        ("无key:合法地址正常解析", {**E, "LLM_BASE_URL": "https://api.openai.com/v1"}),
+        ("无key:全缺省", {**E}),
         # --- 路径 env 的边界(空串曾让 py/js 分叉)---
         ("LLM_CONFIG 空串", {"LLM_CONFIG": "", "OUTREACH_MY_SITE": "",
                              "LLM_BASE_URL": "https://z.com/v1", "LLM_API_KEY": "sk-z1234567890"}),
