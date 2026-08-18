@@ -51,7 +51,7 @@ export const STATUSES = new Set([
 // 不许把它打回 blocked/failed —— 那是"没投出去"的语义,会污染漏斗分母。
 export const DELIVERED = new Set(['success', 'pending_review', 'emailed', 'delivery_ambiguous']);
 export const CONFIRMED_DELIVERED = new Set(['success', 'pending_review', 'emailed']);
-const REGRESSIVE = new Set(['blocked', 'failed']);
+export const REGRESSIVE = new Set(['blocked', 'failed']);   // export 是为了能被 py/js 常量对拍覆盖
 
 // 【修】认领闸和标记生命周期原来都只看 DELIVERED,而 manual / skipped_* 同样是
 // "别再投了"的终态(driver 的 TERMINAL 里有它们)—— 结果两个洞:
@@ -64,7 +64,7 @@ const REGRESSIVE = new Set(['blocked', 'failed']);
 export const CLAIM_BLOCKING = new Set([
   ...DELIVERED, 'manual', 'skipped_paid', 'skipped_badge', 'skipped_fit',
 ]);
-const AMBIGUOUS_UPGRADES = new Set(['success', 'pending_review', 'emailed']);
+export const AMBIGUOUS_UPGRADES = new Set(['success', 'pending_review', 'emailed']);
 export const AUTHORITATIVE_REASONS = new Set([
   'rejected_by_site', 'delisted', 'manual', 'mail_bounced', 'badge_required',
 ]);
@@ -237,7 +237,6 @@ export function upsertSubmission({
   });
   // 状态升级到确认投达时,关闭遗留的 ambiguous 人工任务(同事务语义 → 同一写路径内)
   closeDeliveryAmbiguousTasks(dom, status);
-  releaseClaimIfReopened(dom, status);   // 合法回池时撤认领标记(见该函数注释)
   return { written: true, from, to: status, blockedRegression: false };
 }
 
@@ -312,12 +311,24 @@ function claimMarker(dom) {
   return path.join(DIR, 'claims', `${dom.replace(/[^a-z0-9.-]/g, '_')}.claim`);
 }
 
-/** 状态合法地离开投达态时(如 email_verified 让域回池)必须撤掉认领标记,
- *  否则下一轮 agent 会被自己上一轮的标记挡住,再也投不出去。
- *  这是**唯一**撤标记的地方:一处明确的写,不是竞态。 */
-function releaseClaimIfReopened(dom, status) {
-  if (CLAIM_BLOCKING.has(status)) return;   // 见 CLAIM_BLOCKING 注释:不只是 DELIVERED
-  try { fs.unlinkSync(claimMarker(dom)); } catch { /* 本来就没有 */ }
+/** 显式撤销认领标记 —— **只有人工裁决才该调用它**。
+ *
+ *  这里原本有个"状态离开投达态就自动撤标记"的规则,它是一整类 bug 的来源:
+ *  规则一旦按状态集合来写,就永远要回答"哪些状态该撤",而每漏一个都是
+ *  「已投达的域变回可认领 → 重复 POST」。实测漏过 skipped_badge、
+ *  又漏过 email_verified 和 draft。
+ *
+ *  想清楚之后发现**这条规则根本不需要**:认领会把状态写成 delivery_ambiguous,
+ *  而守卫拒绝它迁到任何可重试态(blocked/failed/email_verified/draft 实测全被拦)。
+ *  也就是说——**有标记的域永远走不到"需要回池"的状态**,自动撤销从来没有用武之地。
+ *  真正需要回池的域(如 blocked → email_verified)压根没有过标记。
+ *
+ *  所以:标记只由人工裁决撤销。人工任务的 guidance 里会给出这个动作。
+ */
+export function releaseClaim(domain) {
+  const dom = canonDomain(domain);
+  try { fs.unlinkSync(claimMarker(dom)); return true; }
+  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
 }
 
 // ---------- 人工任务(append 事件流,读取折叠)----------

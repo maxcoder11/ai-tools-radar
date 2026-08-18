@@ -57,11 +57,47 @@ await t('可重试态仍可认领', () => {
     if (!db.claimDelivery({ domain: dom, source: 't' }).claimed) throw new Error(`${st} 该可认领`);
   }
 });
-await t('已投达域不因 skipped_badge 复活', () => {
-  db.claimDelivery({ domain: 'sx.com', source: 'a' });
-  db.upsertSubmission({ domain: 'sx.com', status: 'success', source: 'a', reason_code: 'published' });
-  db.upsertSubmission({ domain: 'sx.com', status: 'skipped_badge', source: 'm', reason_code: 'badge_required' });
-  if (db.claimDelivery({ domain: 'sx.com', source: 'a2' }).claimed) throw new Error('已投达的域变回可认领了');
+// **穷举**,不要逐个状态列举 —— 列举正是漏掉 email_verified / draft 的原因。
+// 不变式:一个域一旦投达过,后续无论被写成什么状态,都不能再被认领。
+await t('已投达域:遍历全部状态都不复活', () => {
+  const bad = [];
+  let i = 0;
+  for (const st of db.STATUSES) {
+    const dom = `ex${i++}.com`;
+    db.claimDelivery({ domain: dom, source: 'a' });
+    db.upsertSubmission({ domain: dom, status: 'success', source: 'a', reason_code: 'published' });
+    db.upsertSubmission({ domain: dom, status: st, source: 'm' });
+    if (db.claimDelivery({ domain: dom, source: 'a2' }).claimed) bad.push(st);
+  }
+  if (bad.length) throw new Error(`这些状态会让已投达的域复活: ${bad.join(', ')}`);
+});
+// 认领过的域走不到任何可重试态 —— 这是"不需要自动撤标记"的前提,前提塌了要立刻知道
+await t('认领后走不到可重试态', () => {
+  const bad = [];
+  let i = 0;
+  for (const st of ['blocked', 'failed', 'email_verified', 'draft']) {
+    const dom = `rt${i++}.com`;
+    db.claimDelivery({ domain: dom, source: 'a' });
+    if (db.upsertSubmission({ domain: dom, status: st, source: 'a' }).written) bad.push(st);
+  }
+  if (bad.length) throw new Error(`认领后竟能迁到可重试态 ${bad.join(', ')} —— `
+    + `"不需要自动撤标记"的前提不成立了,见 releaseClaim 注释`);
+});
+// 人工裁决是**两道闸、两步**:标记 + 账本状态。少做一步都不该放行 —— 这是有意的。
+await t('人工裁决需要两步(标记 + 状态)', () => {
+  db.claimDelivery({ domain: 'rc.com', source: 'a' });
+  if (db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) throw new Error('二次认领该被挡');
+
+  if (!db.releaseClaim('rc.com')) throw new Error('撤销标记该返回 true');
+  if (db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) {
+    throw new Error('只撤标记就放行了 —— 账本仍是 delivery_ambiguous,第一道闸该拦住');
+  }
+  // 上一行被状态闸拦下时会**补建标记**(见 claimDelivery 的兜底分支),所以要再撤一次
+  db.upsertSubmission({ domain: 'rc.com', status: 'blocked', source: 'human', force: true });
+  db.releaseClaim('rc.com');
+  if (!db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) {
+    throw new Error('两步都做完之后该可以重新认领');
+  }
 });
 await t('email_verified 两边都认', () => db.upsertSubmission({ domain: 'ev2.com', status: 'email_verified', source: 't' }));
 // 落账失败必须把标记撤回,否则该域此后永远认领不了

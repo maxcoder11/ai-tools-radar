@@ -132,6 +132,27 @@ def cases(tmp):
     ]
 
 
+def shared_constants():
+    """py/js 共享常量对拍。两边是两份实现、共用同一个账本与 claims/ 目录,
+    常量一旦分叉就是"一边认为该拒、另一边放行"。手工对齐必须有对拍兜着。"""
+    KEYS = ["STATUSES", "DELIVERED", "CONFIRMED_DELIVERED", "CLAIM_BLOCKING",
+            "REGRESSIVE", "AMBIGUOUS_UPGRADES", "AUTHORITATIVE_REASONS"]
+    env = {"OUTREACH_STATE_DIR": tempfile.mkdtemp()}
+    py = _run([sys.executable, "-c",
+               "import json,state;print(json.dumps({k:sorted(getattr(state,k)) for k in "
+               + repr(KEYS) + "},sort_keys=True))"], env)
+    js = _run(["node", "-e",
+               "import('./state.mjs').then(m=>{const o={};for(const k of "
+               + repr(KEYS).replace("'", '"') + ")o[k]=[...m[k]].sort();console.log(JSON.stringify(o))})"], env)
+    bad = [k for k in KEYS if py.get(k) != js.get(k)]
+    for k in KEYS:
+        same = py.get(k) == js.get(k)
+        print(f"{'✅' if same else '❌'} 常量 {k}")
+        if not same:
+            print(f"     PY {py.get(k)}\n     JS {js.get(k)}")
+    return bad
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         bad = []
@@ -145,7 +166,9 @@ def main():
                 bad.append(name)
                 print(f"     PY {py}\n     JS {js}")
         n = len(cases(tmp))
-    print(f"\n{n} 个用例,不一致 {len(bad)} 个" + (f":{bad}" if bad else ""))
+    print()
+    bad += shared_constants()
+    print(f"\n{n} 个配置用例 + 7 组共享常量,不一致 {len(bad)} 个" + (f":{bad}" if bad else ""))
     return 1 if bad else 0
 
 

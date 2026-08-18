@@ -260,15 +260,19 @@ def _claim_marker(dom):
     return os.path.join(DIR, "claims", re.sub(r"[^a-z0-9.-]", "_", dom) + ".claim")
 
 
-def _release_claim_if_reopened(dom, status):
-    """状态合法回到可重试(blocked/failed/email_verified/draft)时撤掉认领标记。
-    与 state.mjs 的 releaseClaimIfReopened 同口径 —— 两边共用同一个 claims/ 目录。"""
-    if status in CLAIM_BLOCKING:
-        return
+def release_claim(domain):
+    """显式撤销认领标记 —— **只有人工裁决才该调用**。与 state.mjs 的 releaseClaim 同口径。
+
+    这里原本有个"状态离开投达态就自动撤标记"的规则,它是一整类 bug 的来源
+    (每漏一个状态 = 已投达的域变回可认领);而实测表明:认领会把状态写成
+    delivery_ambiguous,守卫拒绝它迁到任何可重试态,所以**有标记的域永远走不到
+    需要回池的状态**,自动撤销从来没有用武之地。详见 state.mjs 的同名函数。
+    """
     try:
-        os.unlink(_claim_marker(dom))
-    except OSError:
-        pass
+        os.unlink(_claim_marker(canon_domain(domain)))
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def upsert_submission(domain, status, evidence="", note="",
@@ -301,7 +305,6 @@ def upsert_submission(domain, status, evidence="", note="",
     record_event(dom, "attempt_end" if frm == status else "status_change",
                  prev_status=frm, status=status, reason_code=reason_code,
                  source=source, evidence={"evidence": ev, "note": nt})
-    _release_claim_if_reopened(dom, status)
     return {"written": True, "from": frm, "to": status, "blockedRegression": False}
 
 

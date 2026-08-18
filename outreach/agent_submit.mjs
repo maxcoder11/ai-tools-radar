@@ -420,7 +420,13 @@ function queueForHuman(dom, blocker, guidance, retry = {}) {
 /** 只在真实终端仍为 ambiguous 时入队；writer 会在 delivered 升级时自动关闭。 */
 function queueAmbiguousTerminal(dom, detail, retry) {
   return queueForHuman(dom, 'delivery_ambiguous',
-    `submit 类动作已派发但终局未定(${String(detail || '').slice(0, 160)}):请只核对站方是否已经收件或进入待审。确认已投达点「已投达」；确认明确拒收或未投达点「未投达」；仍无法判断则保留待办。禁止再次提交，以免重复投递。`,
+    `submit 类动作已派发但终局未定(${String(detail || '').slice(0, 160)}):请只核对站方是否已经收件或进入待审。`
+    + `确认**已投达** → 什么都不用做,域保持终态、不会被重投。`
+    + `确认**未投达**且要放回池 → 需要两步(防重复投递有两道独立的闸:账本状态 + claims 标记,`
+    + `少做一步不会放行,这是有意的):`
+    + `① node -e "import('./state.mjs').then(d=>d.upsertSubmission({domain:'${dom}',status:'blocked',source:'human',force:true}))" `
+    + `② node -e "import('./state.mjs').then(d=>d.releaseClaim('${dom}'))"。`
+    + `仍无法判断则保留待办。**别直接再跑一次 agent**,那会重复投递。`,
     retry);
 }
 
