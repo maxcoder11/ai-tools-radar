@@ -83,20 +83,22 @@ await t('认领后走不到可重试态', () => {
   if (bad.length) throw new Error(`认领后竟能迁到可重试态 ${bad.join(', ')} —— `
     + `"不需要自动撤标记"的前提不成立了,见 releaseClaim 注释`);
 });
-// 人工裁决是**两道闸、两步**:标记 + 账本状态。少做一步都不该放行 —— 这是有意的。
-await t('人工裁决需要两步(标记 + 状态)', () => {
+// delivery_ambiguous 的唯一正常出路:确认链接上线 → 标 success。
+// 它**不该**被放回池(那可能给站方发两份),所以这里断言的是"标 success 之后
+// 依然投不出去",而不是"怎么放回池"。
+await t('ambiguous → 确认上线标 success', () => {
+  db.claimDelivery({ domain: 'ok1.com', source: 'agent' });
+  const r = db.upsertSubmission({ domain: 'ok1.com', status: 'success', source: 'human', reason_code: 'published' });
+  if (!r.written) throw new Error('确认上线后该能标 success');
+  if (db.claimDelivery({ domain: 'ok1.com', source: 'x' }).claimed) throw new Error('标 success 后仍不该可认领');
+});
+// 两道闸互相独立:只撤标记不放行。这是安全属性,不是操作流程 ——
+// releaseClaim 是逃生阀,日常不该用(见 state.mjs 该函数注释)。
+await t('只撤标记不放行(两道闸独立)', () => {
   db.claimDelivery({ domain: 'rc.com', source: 'a' });
-  if (db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) throw new Error('二次认领该被挡');
-
   if (!db.releaseClaim('rc.com')) throw new Error('撤销标记该返回 true');
   if (db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) {
-    throw new Error('只撤标记就放行了 —— 账本仍是 delivery_ambiguous,第一道闸该拦住');
-  }
-  // 上一行被状态闸拦下时会**补建标记**(见 claimDelivery 的兜底分支),所以要再撤一次
-  db.upsertSubmission({ domain: 'rc.com', status: 'blocked', source: 'human', force: true });
-  db.releaseClaim('rc.com');
-  if (!db.claimDelivery({ domain: 'rc.com', source: 'a' }).claimed) {
-    throw new Error('两步都做完之后该可以重新认领');
+    throw new Error('只撤标记就放行了 —— 账本仍是 delivery_ambiguous,状态闸该拦住');
   }
 });
 await t('email_verified 两边都认', () => db.upsertSubmission({ domain: 'ev2.com', status: 'email_verified', source: 't' }));

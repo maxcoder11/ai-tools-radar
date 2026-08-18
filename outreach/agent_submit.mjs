@@ -420,15 +420,16 @@ function queueForHuman(dom, blocker, guidance, retry = {}) {
 /** 只在真实终端仍为 ambiguous 时入队；writer 会在 delivered 升级时自动关闭。 */
 function queueAmbiguousTerminal(dom, detail, retry) {
   return queueForHuman(dom, 'delivery_ambiguous',
-    `submit 类动作已派发但终局未定(${String(detail || '').slice(0, 160)}):请只核对站方是否已经收件或进入待审。`
-    + `确认**已投达** → 什么都不用做,域保持终态、不会被重投。`
-    + `确认**未投达**且要放回池 → 需要两步(防重复投递有两道独立的闸:账本状态 + claims 标记,`
-    + `少做一步不会放行,这是有意的):`
-    + `① node -e "import('./state.mjs').then(d=>d.upsertSubmission({domain:'${dom}',status:'blocked',source:'human',force:true}))" `
-    + `② node -e "import('./state.mjs').then(d=>d.releaseClaim('${dom}'))"。`
-    + `仍无法判断则保留待办。**别直接再跑一次 agent**,那会重复投递。`,
+    `submit 已派发但终局未定(${String(detail || '').slice(0, 160)})。`
+    + `**要做的只有一件事:去 ${dom} 上看我们的链接在不在。**`
+    + `在(且是 dofollow)→ 标成功:`
+    + `node -e "import('./state.mjs').then(d=>d.upsertSubmission({domain:'${dom}',status:'success',source:'human',reason_code:'published'}))"`
+    + `(其实 \`node verify_link.mjs --pending --update-status\` 会自动做这件事,人工只是提前确认)。`
+    + `不在、或看不出来 → **什么都别动**。这个域会一直停在这里,不会被自动重投 —— 那正是我们要的:`
+    + `它可能已经投达了,再投一次就是重复提交。少一个目标域的代价,远小于给站方发两份。`,
     retry);
 }
+
 
 // email_otp 动作:从 agent 邮箱取该站的验证码/验证链接
 function link_preview(r) {

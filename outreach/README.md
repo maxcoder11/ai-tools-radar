@@ -132,11 +132,15 @@ node verify_link.mjs example.com               # 指定域
   success 还要过"实站可检索"自验证，检索不到降 pending_review；
 - `emailed`：仅限站内联系表单提交成功且回执可见（代理无发信能力）；
 - `blocked` / `failed`：未投达（每天最多重试一次）；
-- `delivery_ambiguous`：submit 已派发但终局未定 —— **永不自动重投**，人工裁决。
+- `delivery_ambiguous`：submit 已派发但终局未定 —— **永不自动重投**。
   防重复投递有**两道独立的闸**:账本状态 + `claims/<域>.claim` 标记文件。
-  人工确认"未投达、放回池"时两步都要做(少做一步不会放行,这是有意的):
-  `upsertSubmission({domain, status:'blocked', source:'human', force:true})` 与
-  `releaseClaim(domain)`。人工任务的 guidance 里直接给了可复制的命令;
+
+  **人工只需要做一件事:去站上看链接在不在。**
+  在(且 dofollow)→ 标 `success`(`verify_link.mjs --pending --update-status` 会自动做);
+  不在、或看不出来 → **什么都别动**,让它停在这个状态。
+  这个状态的语义就是"可能已经投出去了",把它放回池 = 可能给站方发两份 ——
+  少一个目标域的代价远小于此。(`releaseClaim()` 存在,但那是收拾残局的逃生阀,
+  不是日常动作,别写进流程。)
 - `manual`：有验证码但没配打码 key，已进人工队列；
 - `skipped_paid` / `skipped_badge` / `skipped_fit`：按政策跳过；
 - `email_verified`：验证信点通，blocked 解除回池。
