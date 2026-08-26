@@ -5,7 +5,8 @@
   名录:landing_tools(SW 落地页解析)+ directory_tools(目录 sitemap 挖矿)
   打标:rank_catalog(LLM 分类/双语描述;持续增量)
   流量:traffic_enrich(aitdk 付费接口,月访/全球排名/注册时间)
-过滤:垃圾 TLD/编号域 + 非 AI-first 平台(白名单剔除) + 无流量数据不上榜。
+过滤:垃圾 TLD/编号域 + 非 AI-first 平台(白名单剔除) + 分类器判非工具不上榜。
+  (08-26 用户定:去掉"无流量数据不上榜"阀门,名录打标在即可上榜,无流量排尾部。)
 用法:cd /Users/wy/cafe/toolradar && python3 scripts/build_data.py
 """
 import json
@@ -227,8 +228,8 @@ def main():
         r = cat.get(d, {})
         rk = sw_rank.get(d, 0)
         reg = t.get("registered") or r.get("registered") or rdap_reg.get(d)
-        if not visits and not clicks.get(d) and not reg and not rk:
-            continue                # 都没数 = 死站/垃圾;有注册时间(任意源)或 SW 排名的放行
+        # 【08-26 用户定】去掉流量阀门:名录打标在(首页抓取成功+LLM 分类)即可上榜,
+        # 无流量/排名/注册时间的排尾部;is_tool=false 仍不上榜(下一行)。
         if r.get("is_tool") is False:
             continue                # 【08-16】分类器判非工具(停放页/纯资讯/默认安装页等)不上榜
         r = cat.get(d, {})

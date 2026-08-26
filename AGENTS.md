@@ -23,8 +23,8 @@ cd <本目录> && python3 -m http.server 8899
   `domain, name, desc_zh, desc_en, categories[], free, signup, visits, clicks, bl, bl_blog, global_rank, sem_traffic, sem_positions, mix{organic,direct,…}, monthly[[YYYY-MM-DD,visits]…], mom, kw[{n,v,c}], listed_month, n_dirs, registered, organic, dr`
 - `data/library.json` — 外链库页面数组：`url, src, title, plat, ascore, nt, targets[{d,a}], seen`
 - `data/links/<domain>.json` — 单域 dofollow 明细：`[{u,s,a,p,s2,f}]`（u=来源页,s=标题,a=锚文本,p=平台,s2=权重分,f=首见 epoch 秒）。
-  **每域按 s2 降序截 top 100，不是全量**（1,360 域共 13.5 万行）；对外别说"全部来源"。
-- `data/links/index.json` — 有明细的域名清单（字符串数组，当前 1,360 个）。
+  **每域按 s2 降序截 top 100，不是全量**（2,253 域共 22.3 万行）；对外别说"全部来源"。
+- `data/links/index.json` — 有明细的域名清单（字符串数组，当前 2,253 个）。
 
 ## 改 UI 时的注意点
 
