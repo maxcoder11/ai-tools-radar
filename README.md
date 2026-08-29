@@ -89,6 +89,11 @@ docs/CODEX_REVIEW.md       # 8 轮外审的完整记录(finding / 修法 / 实�
 scripts/                   # 数据聚合脚本(需要私有数据源,仅参考)
 ```
 
+## 作者
+
+由 [LensUp](https://lensup.ai/)（免费纯浏览器文档扫描器，照片 → PDF）背后的团队维护。
+Maintained by the team behind [LensUp](https://lensup.ai/) — a free in-browser document scanner.
+
 ## License
 
 代码 MIT。数据为第三方估算值的聚合快照，版权归原作者所有，仅供研究参考。
